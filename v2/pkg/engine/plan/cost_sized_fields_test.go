@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/resolve"
 )
 
 // TestActualCost_SizedFieldsParentNotTracked verifies that the actual cost of a multi-entity
@@ -82,25 +84,25 @@ func TestActualCost_SizedFieldsParentNotTracked(t *testing.T) {
 
 	t.Run("combined actual cost should not exceed sum of separate costs", func(t *testing.T) {
 		// 4 boards in one request; A and C have 0 items, B has 1 item (11 cv), D has 1 item (12 cv).
-		combined := newCalc().ActualCost(nil, map[string]int{
+		combined := newCalc().ActualCost(resolve.VariablesView{}, map[string]int{
 			"boards":                                4,
 			"boards.items_page.items":               2,
 			"boards.items_page.items.column_values": 23,
 		})
 
-		boardA := newCalc().ActualCost(nil, map[string]int{"boards": 1})
-		boardB := newCalc().ActualCost(nil, map[string]int{
+		boardA := newCalc().ActualCost(resolve.VariablesView{}, map[string]int{"boards": 1})
+		boardB := newCalc().ActualCost(resolve.VariablesView{}, map[string]int{
 			"boards": 1, "boards.items_page.items": 1, "boards.items_page.items.column_values": 11,
 		})
-		boardC := newCalc().ActualCost(nil, map[string]int{"boards": 1})
-		boardD := newCalc().ActualCost(nil, map[string]int{
+		boardC := newCalc().ActualCost(resolve.VariablesView{}, map[string]int{"boards": 1})
+		boardD := newCalc().ActualCost(resolve.VariablesView{}, map[string]int{
 			"boards": 1, "boards.items_page.items": 1, "boards.items_page.items.column_values": 12,
 		})
 		sumSeparate := boardA + boardB + boardC + boardD
 
 		assert.Equal(t, 41, boardB) // board with 1 item and 11 column values
 		assert.Equal(t, 42, boardD) // board with 1 item and 12 column values
-		assert.Equal(t, 124, combined)
+		assert.Equal(t, 123, combined)
 		// Batching multiple entities into one request should never cost more than running them individually
 		assert.LessOrEqual(t, combined, sumSeparate)
 	})

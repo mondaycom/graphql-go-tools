@@ -32,6 +32,7 @@ import (
 	"github.com/wundergraph/astjson"
 
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/resolve"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/operationreport"
 )
@@ -399,13 +400,22 @@ func (node *CostTreeNode) maxDirectiveArgumentWeightsImplementingFields(config *
 	return result
 }
 
-// cost calculates the estimated/actual cost of this node and all descendants.
+// cost dispatches to originalCost or mondayCost based on mondaytweaks.UseMondayCostMethod.
+// It is the single entry point used by EstimateCost, ActualCost, and debugPrint.
+func (node *CostTreeNode) cost(configs map[DSHash]*DataSourceCostConfig, vars resolve.VariablesView, defaultListSize int, actualListSizes map[string]int) float64 {
+	if mondaytweaks.UseMondayCostMethod {
+		return node.mondayCost(configs, vars, defaultListSize, actualListSizes)
+	}
+	return node.originalCost(configs, vars, defaultListSize, actualListSizes)
+}
+
+// originalCost calculates the estimated/actual cost of this node and all descendants.
 //
 // defaultListSize designates the mode of operation.
 // When it is positive, then its value is used as a fallback value of list sizes for the estimated cost.
 // When it is negative, then it computes the actual cost. And it uses the actualListSizes map.
 // For actual cost, multipliers are computed as averages (totalCount/parentCount).
-func (node *CostTreeNode) cost(configs map[DSHash]*DataSourceCostConfig, vars resolve.VariablesView, defaultListSize int, actualListSizes map[string]int) float64 {
+func (node *CostTreeNode) originalCost(configs map[DSHash]*DataSourceCostConfig, vars resolve.VariablesView, defaultListSize int, actualListSizes map[string]int) float64 {
 	if node == nil {
 		return 0
 	}
@@ -415,7 +425,7 @@ func (node *CostTreeNode) cost(configs map[DSHash]*DataSourceCostConfig, vars re
 	// Sum children's costs
 	var childrenCost float64
 	for _, child := range node.children {
-		childrenCost += child.cost(configs, vars, defaultListSize, actualListSizes)
+		childrenCost += child.originalCost(configs, vars, defaultListSize, actualListSizes)
 	}
 
 	// We enforce multiplier=1 for non-list fields.
@@ -437,6 +447,52 @@ func (node *CostTreeNode) cost(configs map[DSHash]*DataSourceCostConfig, vars re
 	// "type Object @cost(weight: 5) { ... }" does exactly the same thing.
 	// Weight defined on a field has priority over the weight defined on a type.
 	cost += (childrenCost + float64(fieldCost)) * multiplier
+	if cost < 0 {
+		cost = 0
+	}
+	return cost
+}
+
+// mondayCost computes the subtree cost with monday.com-specific accuracy improvements:
+//  1. Deferred rounding — fractional multipliers (e.g. 27 cvs / 2 items = 13.5) carry through
+//     the full tree as float64 and are converted to int only at the EstimateCost/ActualCost
+//     boundary.  The original cost() rounds at every level, amplifying the error by the outer
+//     list multiplier (N boards → up to ±N/2 cost units).
+//  2. Inline-fragment type-distribution scaling — fields inside "... on PeopleValue { text }"
+//     are charged only for the fraction of list items that are actually PeopleValue, using
+//     __typename counts tracked in actualListSizes by resolvable.go.
+func (node *CostTreeNode) mondayCost(configs map[DSHash]*DataSourceCostConfig, vars resolve.VariablesView, defaultListSize int, actualListSizes map[string]int) float64 {
+	if node == nil {
+		return 0
+	}
+
+	fieldCost, argsCost, directivesCost, multiplier := node.costsAndMultiplier(configs, vars, defaultListSize, actualListSizes)
+
+	isEstimation := defaultListSize > 0
+	var childrenCost float64
+	for _, child := range node.children {
+		childCost := child.mondayCost(configs, vars, defaultListSize, actualListSizes)
+		// Inline-fragment scaling: charge concrete-type children only for items that actually
+		// matched the type condition.  A child whose TypeName differs from the parent's
+		// fieldTypeName is inside "... on ConcreteType { }" rather than on the interface directly.
+		if !isEstimation && node.returnsListType && node.returnsAbstractType &&
+			len(actualListSizes) > 0 && child.fieldCoords.TypeName != node.fieldTypeName {
+			typeCount := actualListSizes[node.jsonPath+":"+child.fieldCoords.TypeName]
+			parentCount := actualListSizes[node.jsonPath]
+			if parentCount > 0 {
+				childCost = childCost * float64(typeCount) / float64(parentCount)
+			} else {
+				childCost = 0
+			}
+		}
+		childrenCost += childCost
+	}
+
+	if multiplier == 0 && !node.returnsListType {
+		multiplier = 1
+	}
+
+	cost := float64(argsCost+directivesCost) + (childrenCost+float64(fieldCost))*multiplier
 	if cost < 0 {
 		cost = 0
 	}
@@ -492,7 +548,7 @@ func (node *CostTreeNode) costsAndMultiplier(configs map[DSHash]*DataSourceCostC
 		// Maybe we somehow want to log this? Or just ignore it?
 		// Commented condition is a good check for that. Might be needed later:
 		// fieldWeight != nil && node.isEnclosingTypeAbstract && parent.returnsAbstractType
-		if node.isEnclosingTypeAbstract && parent.returnsAbstractType {
+		if node.isEnclosingTypeAbstract && parent.returnsAbstractType && !mondaytweaks.UseInterfaceDefaultCostForAbstractTypes {
 			// This field is part of the enclosing interface/union.
 			// We look into implementing types and find the max-weighted field.
 			// Found fieldWeight can be used for all the calculations.
@@ -550,7 +606,7 @@ func (node *CostTreeNode) costsAndMultiplier(configs map[DSHash]*DataSourceCostC
 
 		// Directive weights: sum from the field's own DirectiveArgumentWeights,
 		// or from implementing types when the enclosing type is abstract.
-		if node.isEnclosingTypeAbstract && parent.returnsAbstractType {
+		if node.isEnclosingTypeAbstract && parent.returnsAbstractType && !mondaytweaks.UseInterfaceDefaultCostForAbstractTypes {
 			for _, weight := range parent.maxDirectiveArgumentWeightsImplementingFields(dsCostConfig, node.fieldCoords.FieldName) {
 				directivesCost += weight
 			}
@@ -633,6 +689,15 @@ func (node *CostTreeNode) costsAndMultiplier(configs map[DSHash]*DataSourceCostC
 			}
 			// We compute average to avoid double counting for nested lists
 			multiplier = float64(totalCount) / float64(parentCount)
+		} else {
+			// If the list is empty, that would mean 0 cost for the field's resolver.
+			// That is not very accurate because we called the resolver of this field anyway.
+			// We will add fields and children costs by using this multiplier:
+			if mondaytweaks.UseZeroMultiplierForEmptyLists {
+				multiplier = 0
+			} else {
+				multiplier = 1.0
+			}
 		}
 		// If the list is empty, it means 0 cost for the field's resolver.
 		// That may be non-conservative, but it reflects the actual cost of work done.

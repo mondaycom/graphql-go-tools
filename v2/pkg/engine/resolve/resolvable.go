@@ -17,6 +17,7 @@ import (
 	"github.com/wundergraph/go-arena"
 
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/errorcodes"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/fastjsonext"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/internal/unsafebytes"
@@ -954,6 +955,21 @@ func (r *Resolvable) walkArray(arr *Array, value *astjson.Value) bool {
 	if !r.print {
 		pathKey := r.currentFieldPath()
 		r.actualListSizes[pathKey] += len(values)
+		if mondaytweaks.UseMondayCostMethod {
+			// Track per-type counts so mondayCost() can scale inline-fragment costs
+			// (e.g. "... on PeopleValue { text }") by the fraction of items that are
+			// actually of each concrete type, rather than charging for all items.
+			for _, arrayValue := range values {
+				if arrayValue.Type() != astjson.TypeObject {
+					continue
+				}
+				typeNameVal := arrayValue.Get("__typename")
+				if typeNameVal == nil || typeNameVal.Type() != astjson.TypeString {
+					continue
+				}
+				r.actualListSizes[pathKey+":"+string(typeNameVal.GetStringBytes())]++
+			}
+		}
 	}
 
 	hasPrintedValue := false
