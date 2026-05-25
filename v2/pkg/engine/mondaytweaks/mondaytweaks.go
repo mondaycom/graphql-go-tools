@@ -9,10 +9,6 @@ const (
 	// of the maximum @cost weight across all implementing types — matches Apollo Router.
 	UseInterfaceDefaultCostForAbstractTypes = true
 
-	// UseZeroMultiplierForEmptyLists makes the actual cost multiplier 0 when a list field
-	// returns no items, instead of the default 1 — matches Apollo Router.
-	UseZeroMultiplierForEmptyLists = true
-
 	// UseMondayCostMethod bundles two fixes:
 	//   - Deferred rounding: eliminates compounding error from per-level int truncation
 	//     amplified by outer list multipliers (N boards → up to ±N/2 over-count).
