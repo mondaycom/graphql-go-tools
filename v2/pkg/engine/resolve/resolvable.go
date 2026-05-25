@@ -955,7 +955,7 @@ func (r *Resolvable) walkArray(arr *Array, value *astjson.Value) bool {
 	if !r.print {
 		pathKey := r.currentFieldPath()
 		r.actualListSizes[pathKey] += len(values)
-		if mondaytweaks.UseMondayCostMethod {
+		if mondaytweaks.UseInlineTypeDistributionScaling {
 			// Track per-type counts so mondayCost() can scale inline-fragment costs
 			// (e.g. "... on PeopleValue { text }") by the fraction of items that are
 			// actually of each concrete type, rather than charging for all items.

@@ -9,11 +9,8 @@ const (
 	// of the maximum @cost weight across all implementing types — matches Apollo Router.
 	UseInterfaceDefaultCostForAbstractTypes = true
 
-	// UseMondayCostMethod bundles two fixes:
-	//   - Deferred rounding: eliminates compounding error from per-level int truncation
-	//     amplified by outer list multipliers (N boards → up to ±N/2 over-count).
-	//   - Inline-fragment type-distribution scaling: charges concrete-type fields only for
-	//     items that actually matched the type condition, using __typename counts from the
-	//     resolver stored as "jsonPath:TypeName" keys in actualListSizes.
-	UseMondayCostMethod = true
+	// UseInlineTypeDistributionScaling enables inline-fragment type-distribution scaling: charges
+	// concrete-type fields only for items that actually matched the type condition, using
+	// __typename counts from the resolver stored as "jsonPath:TypeName" keys in actualListSizes.
+	UseInlineTypeDistributionScaling = true
 )

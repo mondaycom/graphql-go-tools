@@ -400,22 +400,13 @@ func (node *CostTreeNode) maxDirectiveArgumentWeightsImplementingFields(config *
 	return result
 }
 
-// cost dispatches to originalCost or mondayCost based on mondaytweaks.UseMondayCostMethod.
-// It is the single entry point used by EstimateCost, ActualCost, and debugPrint.
-func (node *CostTreeNode) cost(configs map[DSHash]*DataSourceCostConfig, vars resolve.VariablesView, defaultListSize int, actualListSizes map[string]int) float64 {
-	if mondaytweaks.UseMondayCostMethod {
-		return node.mondayCost(configs, vars, defaultListSize, actualListSizes)
-	}
-	return node.originalCost(configs, vars, defaultListSize, actualListSizes)
-}
-
-// originalCost calculates the estimated/actual cost of this node and all descendants.
+// cost calculates the estimated/actual cost of this node and all descendants.
 //
 // defaultListSize designates the mode of operation.
 // When it is positive, then its value is used as a fallback value of list sizes for the estimated cost.
 // When it is negative, then it computes the actual cost. And it uses the actualListSizes map.
 // For actual cost, multipliers are computed as averages (totalCount/parentCount).
-func (node *CostTreeNode) originalCost(configs map[DSHash]*DataSourceCostConfig, vars resolve.VariablesView, defaultListSize int, actualListSizes map[string]int) float64 {
+func (node *CostTreeNode) cost(configs map[DSHash]*DataSourceCostConfig, vars resolve.VariablesView, defaultListSize int, actualListSizes map[string]int) float64 {
 	if node == nil {
 		return 0
 	}
@@ -425,7 +416,25 @@ func (node *CostTreeNode) originalCost(configs map[DSHash]*DataSourceCostConfig,
 	// Sum children's costs
 	var childrenCost float64
 	for _, child := range node.children {
-		childrenCost += child.originalCost(configs, vars, defaultListSize, actualListSizes)
+		childCost := child.cost(configs, vars, defaultListSize, actualListSizes)
+
+		// Inline-fragment scaling: charge concrete-type children only for items that actually
+		// matched the type condition.  A child whose TypeName differs from the parent's
+		// fieldTypeName is inside "... on ConcreteType { }" rather than on the interface directly.
+		isEstimation := defaultListSize > 0
+		if mondaytweaks.UseInlineTypeDistributionScaling &&
+			!isEstimation && node.returnsListType && node.returnsAbstractType &&
+			len(actualListSizes) > 0 && child.fieldCoords.TypeName != node.fieldTypeName {
+			typeCount := actualListSizes[node.jsonPath+":"+child.fieldCoords.TypeName]
+			parentCount := actualListSizes[node.jsonPath]
+			if parentCount > 0 {
+				childCost = childCost * float64(typeCount) / float64(parentCount)
+			} else {
+				childCost = 0
+			}
+		}
+
+		childrenCost += childCost
 	}
 
 	// We enforce multiplier=1 for non-list fields.
@@ -447,52 +456,6 @@ func (node *CostTreeNode) originalCost(configs map[DSHash]*DataSourceCostConfig,
 	// "type Object @cost(weight: 5) { ... }" does exactly the same thing.
 	// Weight defined on a field has priority over the weight defined on a type.
 	cost += (childrenCost + float64(fieldCost)) * multiplier
-	if cost < 0 {
-		cost = 0
-	}
-	return cost
-}
-
-// mondayCost computes the subtree cost with monday.com-specific accuracy improvements:
-//  1. Deferred rounding — fractional multipliers (e.g. 27 cvs / 2 items = 13.5) carry through
-//     the full tree as float64 and are converted to int only at the EstimateCost/ActualCost
-//     boundary.  The original cost() rounds at every level, amplifying the error by the outer
-//     list multiplier (N boards → up to ±N/2 cost units).
-//  2. Inline-fragment type-distribution scaling — fields inside "... on PeopleValue { text }"
-//     are charged only for the fraction of list items that are actually PeopleValue, using
-//     __typename counts tracked in actualListSizes by resolvable.go.
-func (node *CostTreeNode) mondayCost(configs map[DSHash]*DataSourceCostConfig, vars resolve.VariablesView, defaultListSize int, actualListSizes map[string]int) float64 {
-	if node == nil {
-		return 0
-	}
-
-	fieldCost, argsCost, directivesCost, multiplier := node.costsAndMultiplier(configs, vars, defaultListSize, actualListSizes)
-
-	isEstimation := defaultListSize > 0
-	var childrenCost float64
-	for _, child := range node.children {
-		childCost := child.mondayCost(configs, vars, defaultListSize, actualListSizes)
-		// Inline-fragment scaling: charge concrete-type children only for items that actually
-		// matched the type condition.  A child whose TypeName differs from the parent's
-		// fieldTypeName is inside "... on ConcreteType { }" rather than on the interface directly.
-		if !isEstimation && node.returnsListType && node.returnsAbstractType &&
-			len(actualListSizes) > 0 && child.fieldCoords.TypeName != node.fieldTypeName {
-			typeCount := actualListSizes[node.jsonPath+":"+child.fieldCoords.TypeName]
-			parentCount := actualListSizes[node.jsonPath]
-			if parentCount > 0 {
-				childCost = childCost * float64(typeCount) / float64(parentCount)
-			} else {
-				childCost = 0
-			}
-		}
-		childrenCost += childCost
-	}
-
-	if multiplier == 0 && !node.returnsListType {
-		multiplier = 1
-	}
-
-	cost := float64(argsCost+directivesCost) + (childrenCost+float64(fieldCost))*multiplier
 	if cost < 0 {
 		cost = 0
 	}
