@@ -70,9 +70,9 @@ package astnormalization
 
 import (
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
-	"github.com/wundergraph/graphql-go-tools/v2/pkg/astnormalization/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astnormalization/uploads"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astvisitor"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/operationreport"
 )
 
@@ -354,7 +354,6 @@ type VariablesNormalizer struct {
 	secondExtract              *astvisitor.Walker
 	thirdDeleteUnused          *astvisitor.Walker
 	fourthCoerce               *astvisitor.Walker
-	fifthNullCoerce            *astvisitor.Walker
 	variablesExtractionVisitor *variablesExtractionVisitor
 }
 
@@ -378,19 +377,11 @@ func NewVariablesNormalizer() *VariablesNormalizer {
 	fourthCoerce := astvisitor.NewWalkerWithID(0, "VariablesCoercion")
 	inputCoercionForList(&fourthCoerce)
 
-	var fifthNullCoercePtr *astvisitor.Walker
-	if mondaytweaks.CoerceNullVariablesWithDefaults {
-		fifthNullCoerce := astvisitor.NewWalkerWithID(8, "NullVariableCoercion")
-		coerceNullVariablesWithDefaults(&fifthNullCoerce)
-		fifthNullCoercePtr = &fifthNullCoerce
-	}
-
 	return &VariablesNormalizer{
 		firstDetectUnused:          &firstDetectUnused,
 		secondExtract:              &secondExtract,
 		thirdDeleteUnused:          &thirdDeleteUnused,
 		fourthCoerce:               &fourthCoerce,
-		fifthNullCoerce:            fifthNullCoercePtr,
 		variablesExtractionVisitor: variablesExtractionVisitor,
 	}
 }
@@ -409,11 +400,15 @@ func (v *VariablesNormalizer) NormalizeOperation(operation, definition *ast.Docu
 		return nil
 	}
 	v.fourthCoerce.Walk(operation, definition, report)
-	if report.HasErrors() {
-		return nil
-	}
-	if v.fifthNullCoerce != nil {
-		v.fifthNullCoerce.Walk(operation, definition, report)
+
+	if mondaytweaks.CoerceNullVariablesWithDefaults {
+		if report.HasErrors() {
+			return nil
+		}
+
+		nullCoerce := astvisitor.NewWalkerWithID(8, "NullVariableCoercion")
+		coerceNullVariablesWithDefaults(&nullCoerce)
+		nullCoerce.Walk(operation, definition, report)
 	}
 
 	return v.variablesExtractionVisitor.uploadsPath
