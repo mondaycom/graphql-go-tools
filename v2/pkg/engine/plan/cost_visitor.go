@@ -3,6 +3,7 @@ package plan
 import (
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astvisitor"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 )
 
 // CostVisitor builds the cost tree during AST traversal.
@@ -66,6 +67,15 @@ func (v *CostVisitor) EnterField(fieldRef int) {
 	isListType := v.Definition.TypeIsList(fieldDefinitionTypeRef)
 	isSimpleType := v.Definition.TypeIsEnum(fieldDefinitionTypeRef, v.Definition) || v.Definition.TypeIsScalar(fieldDefinitionTypeRef, v.Definition)
 	unwrappedTypeName := v.Definition.ResolveTypeNameString(fieldDefinitionTypeRef)
+	if mondaytweaks.FixListOfScalarCostClassification && !isSimpleType && isListType {
+		// TypeIsEnum/TypeIsScalar don't recurse through TypeKindList, so [String!]! returns
+		// false and falls through to ObjectTypeWeight=1, over-counting vs Apollo.
+		// Re-check using the already-unwrapped named type from the definition index.
+		if unwrappedNode, ok := v.Definition.Index.FirstNodeByNameStr(unwrappedTypeName); ok {
+			isSimpleType = unwrappedNode.Kind == ast.NodeKindScalarTypeDefinition ||
+				unwrappedNode.Kind == ast.NodeKindEnumTypeDefinition
+		}
+	}
 
 	arguments := v.extractFieldArguments(fieldRef)
 
