@@ -168,6 +168,13 @@ func (v *CostVisitor) getFieldDataSourceHashes(fieldRef int) []DSHash {
 	dsHashes := make([]DSHash, 0, len(plannerIDs))
 	for _, plannerID := range plannerIDs {
 		if plannerID >= 0 && plannerID < len(v.planners) {
+			if mondaytweaks.SkipEntityResolutionPlannerCostForParentField && !v.planners[plannerID].HasPathWithFieldRef(fieldRef) {
+				// This planner traverses through the field to reach a child (e.g. an entity
+				// resolution planner walking through Query.teams to resolve Team.name), but does
+				// not own the field itself. Counting it as a second data source would inflate the
+				// cost of the parent field beyond what the user's operation actually requests.
+				continue
+			}
 			dsHash := v.planners[plannerID].DataSourceConfiguration().Hash()
 			dsHashes = append(dsHashes, dsHash)
 		}
