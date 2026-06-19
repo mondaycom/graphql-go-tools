@@ -1,8 +1,6 @@
 package plan
 
 import (
-	"fmt"
-
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astvisitor"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
@@ -161,8 +159,6 @@ func (v *CostVisitor) getFieldDataSourceHashes(fieldRef int) []DSHash {
 		return nil
 	}
 
-	fieldName := v.Operation.FieldNameUnsafeString(fieldRef)
-
 	dsHashes := make([]DSHash, 0, len(plannerIDs))
 	for _, plannerID := range plannerIDs {
 		if plannerID >= 0 && plannerID < len(v.planners) {
@@ -174,13 +170,9 @@ func (v *CostVisitor) getFieldDataSourceHashes(fieldRef int) []DSHash {
 				continue
 			}
 			dsHash := v.planners[plannerID].DataSourceConfiguration().Hash()
-			fmt.Printf("[COST DEBUG] field=%q fieldRef=%d plannerID=%d isNested=%v hash=%d\n",
-				fieldName, fieldRef, plannerID, v.planners[plannerID].IsNestedPlanner(), dsHash)
 			dsHashes = append(dsHashes, dsHash)
 		}
 	}
-	fmt.Printf("[COST DEBUG] field=%q fieldRef=%d totalHashes=%d hashes=%v\n",
-		fieldName, fieldRef, len(dsHashes), dsHashes)
 	return dsHashes
 }
 

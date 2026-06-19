@@ -24,4 +24,13 @@ const (
 	// via a PathTypeField entry (HasPathWithFieldRef), i.e. planners that merely traverse
 	// through the field to reach a child.
 	SkipEntityResolutionPlannerCostForParentField = true
+
+	// UseNullableObjectStatsForActualCost makes the actual cost calculation honour
+	// resolution stats for nullable non-list object fields. When a nullable object field
+	// (e.g. parent_item) resolves to null for all elements in the parent list, its children
+	// (e.g. group, board) should contribute zero cost because they were never resolved.
+	// The resolver records how many times the field resolved to non-null; the cost calculator
+	// uses that count divided by the ancestor list size as the multiplier for the field and
+	// its entire subtree.
+	UseNullableObjectStatsForActualCost = true
 )

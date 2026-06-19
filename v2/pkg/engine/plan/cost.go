@@ -34,6 +34,7 @@ import (
 
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/resolve"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/operationreport"
 )
 
@@ -765,6 +766,20 @@ func (node *CostTreeNode) costsAndMultiplier(input *costInput) (nodeCost costNod
 			nodeCost.multiplier = float64(nodeStats.Size) / float64(enclosingSize)
 		}
 		return
+	}
+
+	// Non-list nullable object field: use resolution stats to compute the fraction of
+	// times this field actually resolved (non-null) within the ancestor list.
+	// If the field was always null, multiplier becomes 0 and the entire subtree costs nothing.
+	if mondaytweaks.UseNullableObjectStatsForActualCost && !node.returnsSimpleType {
+		if nodeStats, ok := input.typeStats[node.jsonPath]; ok {
+			enclosingSize := ancestorStats.Size
+			if enclosingSize <= 0 {
+				enclosingSize = 1
+			}
+			nodeCost.multiplier = float64(nodeStats.Size) / float64(enclosingSize)
+			return
+		}
 	}
 
 	// Non-list field. If it sits directly under an abstract list, narrow

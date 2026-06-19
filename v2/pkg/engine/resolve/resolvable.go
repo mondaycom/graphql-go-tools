@@ -694,6 +694,9 @@ func (r *Resolvable) walkObject(obj *Object, parent *astjson.Value) bool {
 		r.enclosingTypeNames = r.enclosingTypeNames[:len(r.enclosingTypeNames)-1]
 	}()
 	value := parent.Get(obj.Path...)
+	if !r.print && len(obj.Path) > 0 && obj.Nullable {
+		r.recordNullableObjectStats(obj, value)
+	}
 	if value == nil || value.Type() == astjson.TypeNull {
 		if obj.Nullable {
 			return r.walkNull()
@@ -1018,6 +1021,25 @@ func (r *Resolvable) walkArray(arr *Array, value *astjson.Value) bool {
 		r.printBytes(rBrack)
 	}
 	return false
+}
+
+// recordNullableObjectStats records whether a nullable non-list object field resolved
+// to a value or null. This is called before the path is pushed, so we build the path
+// key manually. The cost calculator uses Size / ancestorListSize as the multiplier.
+func (r *Resolvable) recordNullableObjectStats(obj *Object, value *astjson.Value) {
+	pathKey := r.currentFieldPath()
+	for _, p := range obj.Path {
+		if pathKey == "" {
+			pathKey = p
+		} else {
+			pathKey = pathKey + "." + p
+		}
+	}
+	stats := r.typeNameStats[pathKey]
+	if value != nil && value.Type() != astjson.TypeNull {
+		stats.Size++
+	}
+	r.typeNameStats[pathKey] = stats
 }
 
 // recordObjectTypeStats records the runtime __typename of a single (non-array) object
