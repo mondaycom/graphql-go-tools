@@ -1,8 +1,9 @@
 package astnormalization
 
 // This file holds the linearized variable-extraction helpers gated behind
-// mondaytweaks.OptimizeVariablesExtraction. They replace three super-linear hotspots on
-// the aliased-batch mutation shape (see mondaytweaks.OptimizeVariablesExtraction):
+// mondaytweaks.OptimizeVariablesExtraction (name generation + dedup) and
+// mondaytweaks.BatchExtractedVariablesJSON (the in-place Input.Variables append). Together
+// they replace three super-linear hotspots on the aliased-batch mutation shape:
 //
 //   - nextGeneratedVariableName replaces Document.GenerateUnusedVariableDefinitionName,
 //     which restarts its search from "a" and linearly scans the operation's variable
@@ -75,4 +76,69 @@ func (v *variablesExtractionVisitor) typeValueDedupKey(inputValueDefinition int,
 	key = append(key, 0)
 	key = append(key, valueBytes...)
 	return string(key)
+}
+
+// appendExtractedVariableRaw registers a newly extracted variable in Input.Variables without
+// re-serialising the whole buffer, replacing the per-variable sjson.SetRawBytes write (which
+// copies O(N) bytes per call, O(N^2) over the batch). It appends "name":value in place into a
+// per-document owned buffer, so N extractions cost O(N) amortised.
+//
+// The buffer is copied on first use (never reused across documents) so we neither mutate the
+// caller's shared Input.Variables backing array nor corrupt a previous operation's variables
+// still referenced through its buffer. Input.Variables is repointed after every append and
+// remains a valid JSON object throughout, so uploads.FindUploads — which reparses it on each
+// argument — observes exactly the bytes it does on the sjson path.
+func (v *variablesExtractionVisitor) appendExtractedVariableRaw(name, value []byte) {
+	if !v.varsBufOwned {
+		v.varsBuf = append([]byte(nil), v.operation.Input.Variables...)
+		v.varsBufOwned = true
+	}
+	v.varsBuf = appendJSONObjectMember(v.varsBuf, name, value)
+	v.operation.Input.Variables = v.varsBuf
+}
+
+// appendJSONObjectMember appends a raw "name":value member as the last entry of the JSON
+// object in dst, keeping dst a valid object. dst may be empty, "null", "{}", or a populated
+// object. Because extracted variable names are freshly generated and never already present,
+// this matches where sjson.SetRawBytes places a not-yet-existing top-level key, so the output
+// is byte-identical to the per-variable sjson path (asserted by the differential test). dst is
+// mutated in place and may be reallocated on growth, exactly like append.
+func appendJSONObjectMember(dst, name, value []byte) []byte {
+	end := len(dst)
+	for end > 0 && isJSONWhitespace(dst[end-1]) {
+		end--
+	}
+	// Empty, "null", or any non-object payload: emit a fresh single-member object.
+	if end == 0 || dst[end-1] != '}' {
+		out := dst[:0]
+		out = append(out, '{', '"')
+		out = append(out, name...)
+		out = append(out, '"', ':')
+		out = append(out, value...)
+		out = append(out, '}')
+		return out
+	}
+	// dst[end-1] is the closing brace. Decide whether the object already has members by
+	// looking at the last non-whitespace byte before it: '{' means empty.
+	brace := end - 1
+	j := brace
+	for j > 0 && isJSONWhitespace(dst[j-1]) {
+		j--
+	}
+	hasMembers := j > 0 && dst[j-1] != '{'
+
+	out := dst[:brace]
+	if hasMembers {
+		out = append(out, ',')
+	}
+	out = append(out, '"')
+	out = append(out, name...)
+	out = append(out, '"', ':')
+	out = append(out, value...)
+	out = append(out, '}')
+	return out
+}
+
+func isJSONWhitespace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
 }

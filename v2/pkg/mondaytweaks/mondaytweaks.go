@@ -78,13 +78,39 @@ var (
 	// With this fix the visitor (single-operation documents only) generates names from a
 	// monotonic cursor that skips only pre-existing user variable names (O(1) amortized) and
 	// deduplicates via a (canonical-type, value) map (O(1) per argument), replacing the two
-	// dominant super-linear hotspots. The per-variable sjson.SetRawBytes write is
-	// intentionally retained: sjson's key placement is not a plain append, so a batched
-	// builder would emit a different (though equivalent) key order and diverge from the
-	// extraction corpus. Output is byte-identical to the upstream path; the differential test
-	// in variables_extraction_optimized_test.go asserts this across the extraction corpus
-	// plus batch shapes. Multi-operation documents fall back to the original path, where
-	// generated names are shared across operations through the shared Input.Variables buffer.
-	// When this flag is false the original path runs unchanged.
+	// dominant super-linear hotspots. The remaining per-variable sjson.SetRawBytes write is
+	// addressed separately by BatchExtractedVariablesJSON. Output is byte-identical to the
+	// upstream path; the differential test in variables_extraction_optimized_test.go asserts
+	// this across the extraction corpus plus batch shapes. Multi-operation documents fall back
+	// to the original path, where generated names are shared across operations through the
+	// shared Input.Variables buffer. When this flag is false the original path runs unchanged.
 	OptimizeVariablesExtraction = true
+
+	// BatchExtractedVariablesJSON removes the per-variable sjson.SetRawBytes write in the
+	// variable-extraction normalizer. Each sjson.SetRawBytes call re-parses and re-serialises
+	// the entire (growing) Input.Variables buffer, so extracting N inline arguments copies
+	// O(N^2) bytes; on the aliased-batch mutation shape sjson.appendRawPaths was the single
+	// largest transient allocator in the extraction profile (~40% of allocations). This flag
+	// switches the optimized path to append each new "name":value member in place into a
+	// per-document owned buffer (amortised O(1) per write, O(N) total), keeping Input.Variables
+	// a valid JSON object after every write so uploads.FindUploads — which parses it on each
+	// argument — still observes the same bytes it does today. Generated names never pre-exist
+	// in the buffer, so they append at the end in first-occurrence order, exactly where sjson
+	// places them: output is byte-identical to the sjson path (asserted by the differential
+	// test with this flag toggled). Only takes effect when OptimizeVariablesExtraction is also
+	// enabled (single-operation documents); when false the per-variable sjson write runs
+	// unchanged.
+	//
+	// Byte-order note: sjson.SetRawBytes prepends each new top-level key, so the sjson path
+	// emits extracted variables in reverse first-occurrence order, whereas the in-place append
+	// emits them in forward order. The two Input.Variables buffers are therefore
+	// key-reordered, not byte-identical. This is functionally invisible — the operation AST
+	// (which references $a, $b, ...) is identical on both paths, RemapVariables canonicalises
+	// variable order before the operation hash, and the variables object is order-independent
+	// at execution — but it means the byte-exact upstream extraction corpus only matches the
+	// sjson path. This flag therefore defaults OFF (upstream tests keep the sjson bytes) and is
+	// intended to be enabled together with OptimizeVariablesExtraction as a per-cluster canary;
+	// TestVariablesExtraction_BatchedMatchesSemantically asserts the two paths are semantically
+	// equal (identical AST, deep-equal variables) across the corpus and batch shapes.
+	BatchExtractedVariablesJSON = false
 )
