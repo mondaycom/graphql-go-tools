@@ -90,27 +90,23 @@ var (
 	// variable-extraction normalizer. Each sjson.SetRawBytes call re-parses and re-serialises
 	// the entire (growing) Input.Variables buffer, so extracting N inline arguments copies
 	// O(N^2) bytes; on the aliased-batch mutation shape sjson.appendRawPaths was the single
-	// largest transient allocator in the extraction profile (~40% of allocations). This flag
-	// switches the optimized path to append each new "name":value member in place into a
-	// per-document owned buffer (amortised O(1) per write, O(N) total), keeping Input.Variables
-	// a valid JSON object after every write so uploads.FindUploads — which parses it on each
-	// argument — still observes the same bytes it does today. Generated names never pre-exist
-	// in the buffer, so they append at the end in first-occurrence order, exactly where sjson
-	// places them: output is byte-identical to the sjson path (asserted by the differential
-	// test with this flag toggled). Only takes effect when OptimizeVariablesExtraction is also
-	// enabled (single-operation documents); when false the per-variable sjson write runs
-	// unchanged.
+	// largest transient allocator in the extraction profile (~40% of allocations).
 	//
-	// Byte-order note: sjson.SetRawBytes prepends each new top-level key, so the sjson path
-	// emits extracted variables in reverse first-occurrence order, whereas the in-place append
-	// emits them in forward order. The two Input.Variables buffers are therefore
-	// key-reordered, not byte-identical. This is functionally invisible — the operation AST
-	// (which references $a, $b, ...) is identical on both paths, RemapVariables canonicalises
-	// variable order before the operation hash, and the variables object is order-independent
-	// at execution — but it means the byte-exact upstream extraction corpus only matches the
-	// sjson path. This flag therefore defaults OFF (upstream tests keep the sjson bytes) and is
-	// intended to be enabled together with OptimizeVariablesExtraction as a per-cluster canary;
-	// TestVariablesExtraction_BatchedMatchesSemantically asserts the two paths are semantically
-	// equal (identical AST, deep-equal variables) across the corpus and batch shapes.
-	BatchExtractedVariablesJSON = false
+	// With this flag the optimized path buffers each extracted (name,value) pair in
+	// first-occurrence order and defers a single Input.Variables build to LeaveDocument
+	// (flushBatchedExtractedVariables), replacing N growing re-serialisations with one
+	// O(total bytes) pass. Deferral is safe: no inline value can reference a just-generated
+	// variable name, so uploads.FindUploads — the only reader of Input.Variables on this path
+	// — needs only the original client variables, which stay untouched during the walk.
+	//
+	// The build is byte-identical to the sjson path, not merely semantically equal. sjson
+	// inserts each not-yet-present top-level key at the FRONT of the object, so after N
+	// sequential inserts the extracted variables appear in reverse creation order ahead of any
+	// pre-existing client variables; the deferred build emits exactly that order. The
+	// differential test in variables_extraction_optimized_test.go asserts byte-identity across
+	// the extraction corpus and batch shapes with this flag toggled, and the upstream
+	// byte-exact corpus (TestVariablesExtraction, TestInputCoercionForList, TestNormalizeOperation)
+	// passes with it enabled. Only takes effect when OptimizeVariablesExtraction is also enabled
+	// (single-operation documents); when false the per-variable sjson write runs unchanged.
+	BatchExtractedVariablesJSON = true
 )

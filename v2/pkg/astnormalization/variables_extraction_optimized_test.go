@@ -137,15 +137,13 @@ func TestVariablesExtraction_MultiOperationFallsBack(t *testing.T) {
 	assert.Equal(t, varsOrig, varsOpt)
 }
 
-// TestVariablesExtraction_BatchedMatchesSemantically asserts the batched Input.Variables
-// build (mondaytweaks.BatchExtractedVariablesJSON) is semantically equivalent to the
-// per-variable sjson path: the printed operation AST is byte-identical (both paths generate
-// the same variable names in the same order and only differ in how the variables object is
-// serialised) and the variables object is deep-equal. It is intentionally NOT byte-identical:
-// sjson prepends new keys while the batched build appends them, so the two objects are
-// key-reordered. Order is irrelevant downstream (RemapVariables canonicalises it before the
-// operation hash), which is what makes shipping the batched build safe.
-func TestVariablesExtraction_BatchedMatchesSemantically(t *testing.T) {
+// TestVariablesExtraction_BatchedMatchesSjson asserts the batched Input.Variables build
+// (mondaytweaks.BatchExtractedVariablesJSON) is byte-identical to the per-variable sjson path,
+// not merely semantically equal. The deferred build reproduces sjson's set-or-replace order
+// (new keys prepended in reverse creation order, colliding names overwritten in place), so the
+// printed AST and the variables JSON both match the sjson path exactly. This byte-identity is
+// what lets the flag default on without touching the upstream byte-exact extraction corpus.
+func TestVariablesExtraction_BatchedMatchesSjson(t *testing.T) {
 	origOptimize := mondaytweaks.OptimizeVariablesExtraction
 	origBatch := mondaytweaks.BatchExtractedVariablesJSON
 	t.Cleanup(func() {
@@ -154,7 +152,7 @@ func TestVariablesExtraction_BatchedMatchesSemantically(t *testing.T) {
 	})
 
 	// Both configurations run the optimized name/dedup path; only the Input.Variables writer
-	// differs (sjson vs in-place append).
+	// differs (per-variable sjson vs the deferred batched build).
 	mondaytweaks.OptimizeVariablesExtraction = true
 
 	for _, c := range extractionCorpus() {
@@ -166,9 +164,54 @@ func TestVariablesExtraction_BatchedMatchesSemantically(t *testing.T) {
 			astBatched, varsBatched := extractOnce(t, c.definition, c.operation)
 
 			assert.Equal(t, astSjson, astBatched, "printed AST diverges between sjson and batched paths")
-			assert.JSONEq(t, varsSjson, varsBatched, "variables object diverges (beyond key order) between sjson and batched paths")
+			assert.Equal(t, varsSjson, varsBatched, "variables JSON diverges between sjson and batched paths")
 		})
 	}
+}
+
+// TestVariablesExtraction_BatchedOverwritesCollidingSeededVariable covers the one case the
+// extraction corpus does not: a pre-seeded client variable whose name collides with a
+// generated name. sjson overwrites it in place; the batched build must reproduce that (rather
+// than emit a duplicate key). Both paths must land on the same bytes.
+func TestVariablesExtraction_BatchedOverwritesCollidingSeededVariable(t *testing.T) {
+	origOptimize := mondaytweaks.OptimizeVariablesExtraction
+	origBatch := mondaytweaks.BatchExtractedVariablesJSON
+	t.Cleanup(func() {
+		mondaytweaks.OptimizeVariablesExtraction = origOptimize
+		mondaytweaks.BatchExtractedVariablesJSON = origBatch
+	})
+	mondaytweaks.OptimizeVariablesExtraction = true
+
+	const definition = sameVariableExtraction
+	// Two inline args extract to generated names a and b; the seeded object already carries a
+	// (collision, overwritten in place) and an unrelated z (front-prepended survivors precede
+	// it, z stays last).
+	const operation = `mutation Foo { bar(string: "foo") baz(int: 1) }`
+	const seeded = `{"a": "stale", "z": true}`
+
+	run := func() (string, string) {
+		def := unsafeparser.ParseGraphqlDocumentString(definition)
+		require.NoError(t, asttransform.MergeDefinitionWithBaseSchema(&def))
+		op := unsafeparser.ParseGraphqlDocumentString(operation)
+		op.Input.Variables = []byte(seeded)
+		report := operationreport.Report{}
+		walker := astvisitor.NewWalker(48)
+		extractVariables(&walker)
+		walker.Walk(&op, &def, &report)
+		require.Falsef(t, report.HasErrors(), "unexpected normalization error: %s", report.Error())
+		printed, err := astprinter.PrintString(&op)
+		require.NoError(t, err)
+		return printed, string(op.Input.Variables)
+	}
+
+	mondaytweaks.BatchExtractedVariablesJSON = false
+	astSjson, varsSjson := run()
+
+	mondaytweaks.BatchExtractedVariablesJSON = true
+	astBatched, varsBatched := run()
+
+	assert.Equal(t, astSjson, astBatched)
+	assert.Equal(t, varsSjson, varsBatched, "batched build must reproduce sjson's in-place overwrite of colliding seeded variables")
 }
 
 // BenchmarkVariablesExtraction_OptimizedVsOriginal runs the batch shape under both paths so

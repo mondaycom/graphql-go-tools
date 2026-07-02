@@ -1,8 +1,16 @@
 package astnormalization
 
+import (
+	"github.com/buger/jsonparser"
+	"github.com/tidwall/sjson"
+
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/internal/unsafebytes"
+)
+
 // This file holds the linearized variable-extraction helpers gated behind
 // mondaytweaks.OptimizeVariablesExtraction (name generation + dedup) and
-// mondaytweaks.BatchExtractedVariablesJSON (the in-place Input.Variables append). Together
+// mondaytweaks.BatchExtractedVariablesJSON (the deferred Input.Variables build). Together
 // they replace three super-linear hotspots on the aliased-batch mutation shape:
 //
 //   - nextGeneratedVariableName replaces Document.GenerateUnusedVariableDefinitionName,
@@ -78,65 +86,118 @@ func (v *variablesExtractionVisitor) typeValueDedupKey(inputValueDefinition int,
 	return string(key)
 }
 
-// appendExtractedVariableRaw registers a newly extracted variable in Input.Variables without
-// re-serialising the whole buffer, replacing the per-variable sjson.SetRawBytes write (which
-// copies O(N) bytes per call, O(N^2) over the batch). It appends "name":value in place into a
-// per-document owned buffer, so N extractions cost O(N) amortised.
-//
-// The buffer is copied on first use (never reused across documents) so we neither mutate the
-// caller's shared Input.Variables backing array nor corrupt a previous operation's variables
-// still referenced through its buffer. Input.Variables is repointed after every append and
-// remains a valid JSON object throughout, so uploads.FindUploads — which reparses it on each
-// argument — observes exactly the bytes it does on the sjson path.
-func (v *variablesExtractionVisitor) appendExtractedVariableRaw(name, value []byte) {
-	if !v.varsBufOwned {
-		v.varsBuf = append([]byte(nil), v.operation.Input.Variables...)
-		v.varsBufOwned = true
+// LeaveDocument flushes the variables buffered on the batched path into Input.Variables in a
+// single build. On the default (sjson) path nothing is buffered — each variable is written in
+// EnterArgument — so this is a no-op.
+func (v *variablesExtractionVisitor) LeaveDocument(_, _ *ast.Document) {
+	if !v.batchVarsJSON || len(v.pendingVarNames) == 0 {
+		return
 	}
-	v.varsBuf = appendJSONObjectMember(v.varsBuf, name, value)
-	v.operation.Input.Variables = v.varsBuf
+	v.operation.Input.Variables = flushBatchedExtractedVariables(v.operation.Input.Variables, v.pendingVarNames, v.pendingVarValues)
 }
 
-// appendJSONObjectMember appends a raw "name":value member as the last entry of the JSON
-// object in dst, keeping dst a valid object. dst may be empty, "null", "{}", or a populated
-// object. Because extracted variable names are freshly generated and never already present,
-// this matches where sjson.SetRawBytes places a not-yet-existing top-level key, so the output
-// is byte-identical to the per-variable sjson path (asserted by the differential test). dst is
-// mutated in place and may be reallocated on growth, exactly like append.
-func appendJSONObjectMember(dst, name, value []byte) []byte {
-	end := len(dst)
-	for end > 0 && isJSONWhitespace(dst[end-1]) {
-		end--
-	}
-	// Empty, "null", or any non-object payload: emit a fresh single-member object.
-	if end == 0 || dst[end-1] != '}' {
-		out := dst[:0]
-		out = append(out, '{', '"')
-		out = append(out, name...)
-		out = append(out, '"', ':')
-		out = append(out, value...)
-		out = append(out, '}')
-		return out
-	}
-	// dst[end-1] is the closing brace. Decide whether the object already has members by
-	// looking at the last non-whitespace byte before it: '{' means empty.
-	brace := end - 1
-	j := brace
-	for j > 0 && isJSONWhitespace(dst[j-1]) {
-		j--
-	}
-	hasMembers := j > 0 && dst[j-1] != '{'
+// flushBatchedExtractedVariables builds the final Input.Variables object from the original
+// buffer (the client-supplied variables, left untouched during extraction) and the extracted
+// (name,value) pairs captured in first-occurrence order. It reproduces the per-variable
+// sjson.SetRawBytes path byte-for-byte.
+//
+// sjson has set-or-replace semantics: a not-yet-present top-level key is inserted at the FRONT
+// of the object, while an already-present key is overwritten in place (position and key
+// formatting preserved). So after N sequential inserts the newly generated variables appear in
+// reverse creation order ahead of any pre-existing client variables, and any generated name
+// that happens to collide with a pre-seeded client variable overwrites it where it sits.
+//
+// The fast path is the aliased-batch target: the client sent no variables (orig is empty), so
+// nothing can collide, every pair is new, and the whole object is built in a single
+// O(total bytes) pass instead of sjson's O(N^2). When orig already has members we detect the
+// (rare) colliding names and replay just those through sjson to reproduce its in-place
+// overwrite, then front-prepend the genuinely new names in reverse creation order.
+func flushBatchedExtractedVariables(orig []byte, names, values [][]byte) []byte {
+	newNames, newValues := names, values
 
-	out := dst[:brace]
+	if _, hasMembers := jsonObjectInner(orig); hasMembers {
+		existing := existingTopLevelKeys(orig)
+		if len(existing) > 0 {
+			newNames, newValues = names[:0:0], values[:0:0]
+			for i := range names {
+				if _, collides := existing[string(names[i])]; collides {
+					if buf, err := sjson.SetRawBytes(orig, unsafebytes.BytesToString(names[i]), values[i]); err == nil {
+						orig = buf
+					}
+					continue
+				}
+				newNames = append(newNames, names[i])
+				newValues = append(newValues, values[i])
+			}
+		}
+	}
+
+	if len(newNames) == 0 {
+		return orig
+	}
+
+	inner, hasMembers := jsonObjectInner(orig)
+
+	size := 2 + len(inner) // outer braces + preserved original members
+	for i := range newNames {
+		size += len(newNames[i]) + len(newValues[i]) + 4 // two quotes, colon, comma
+	}
+
+	out := make([]byte, 0, size)
+	out = append(out, '{')
+	for i := len(newNames) - 1; i >= 0; i-- {
+		if i != len(newNames)-1 {
+			out = append(out, ',')
+		}
+		out = append(out, '"')
+		out = append(out, newNames[i]...)
+		out = append(out, '"', ':')
+		out = append(out, newValues[i]...)
+	}
 	if hasMembers {
 		out = append(out, ',')
+		out = append(out, inner...)
 	}
-	out = append(out, '"')
-	out = append(out, name...)
-	out = append(out, '"', ':')
-	out = append(out, value...)
 	out = append(out, '}')
 	return out
+}
+
+// existingTopLevelKeys returns the set of top-level object keys already present in src, used to
+// detect generated names that collide with pre-seeded client variables. It is only built when
+// src actually has members, so the aliased-batch fast path (empty client variables) never
+// allocates it.
+func existingTopLevelKeys(src []byte) map[string]struct{} {
+	keys := make(map[string]struct{})
+	_ = jsonparser.ObjectEach(src, func(key, _ []byte, _ jsonparser.ValueType, _ int) error {
+		keys[string(key)] = struct{}{}
+		return nil
+	})
+	return keys
+}
+
+// jsonObjectInner returns the content between the outer braces of the JSON object in src and
+// whether that object has any members. An empty buffer, "null", or an empty object (any
+// whitespace-only "{}") reports no members, matching sjson treating a missing/empty document
+// as an empty object when it sets the first key.
+func jsonObjectInner(src []byte) (inner []byte, hasMembers bool) {
+	start := 0
+	for start < len(src) && isJSONWhitespace(src[start]) {
+		start++
+	}
+	end := len(src)
+	for end > start && isJSONWhitespace(src[end-1]) {
+		end--
+	}
+	if end-start < 2 || src[start] != '{' || src[end-1] != '}' {
+		return nil, false
+	}
+	inner = src[start+1 : end-1]
+	for i := range inner {
+		if !isJSONWhitespace(inner[i]) {
+			return inner, true
+		}
+	}
+	return nil, false
 }
 
 func isJSONWhitespace(b byte) bool {
