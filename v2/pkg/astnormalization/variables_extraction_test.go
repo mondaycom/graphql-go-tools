@@ -7,6 +7,7 @@ import (
 
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astnormalization/uploads"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astvisitor"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 )
 
 func TestVariablesExtraction(t *testing.T) {
@@ -556,6 +557,12 @@ func TestVariablesExtraction(t *testing.T) {
 	})
 
 	t.Run("file uploads", func(t *testing.T) {
+		// These assert upload-path discovery, which mondaytweaks.DisableUploadFinding turns off
+		// by default (the router never handles uploads). Re-enable it to test the upstream pass.
+		origDisableUploadFinding := mondaytweaks.DisableUploadFinding
+		t.Cleanup(func() { mondaytweaks.DisableUploadFinding = origDisableUploadFinding })
+		mondaytweaks.DisableUploadFinding = false
+
 		t.Run("arg has inline object value with upload passed via variable", func(t *testing.T) {
 			var visitor *variablesExtractionVisitor
 
@@ -655,6 +662,42 @@ func TestVariablesExtraction(t *testing.T) {
 			}, visitor.uploadsPath)
 		})
 	})
+}
+
+// TestVariablesExtraction_DisableUploadFindingSkipsDiscovery verifies that
+// mondaytweaks.DisableUploadFinding only suppresses the upload-path discovery side output: the
+// printed operation AST and the resulting Input.Variables are identical whether finding runs or
+// not (both runs assert the same expected output), while uploadsPath is populated only when
+// finding is enabled. This is what makes skipping FindUploads safe for router traffic, which
+// never carries uploads.
+func TestVariablesExtraction_DisableUploadFindingSkipsDiscovery(t *testing.T) {
+	orig := mondaytweaks.DisableUploadFinding
+	t.Cleanup(func() { mondaytweaks.DisableUploadFinding = orig })
+
+	const definition = `scalar Upload input Input {f: Upload!} type Mutation { hello(arg: Input!): String }`
+	const operation = `mutation Foo($i: Upload!) { hello(arg: {f: $i}) }`
+
+	run := func() *variablesExtractionVisitor {
+		var visitor *variablesExtractionVisitor
+		register := func(walker *astvisitor.Walker) *variablesExtractionVisitor {
+			visitor = extractVariables(walker)
+			return visitor
+		}
+		runWithVariablesExtractionAndPreNormalize(t, register,
+			definition, operation, "Foo",
+			`mutation Foo($i: Upload!, $a: Input!){hello(arg: $a)}`,
+			`{"i":null}`, `{"a":{"f":null},"i":null}`,
+		)
+		return visitor
+	}
+
+	mondaytweaks.DisableUploadFinding = false
+	enabled := run()
+	assert.NotEmpty(t, enabled.uploadsPath, "upload path must be discovered when finding is enabled")
+
+	mondaytweaks.DisableUploadFinding = true
+	disabled := run()
+	assert.Empty(t, disabled.uploadsPath, "no upload path should be produced when finding is disabled")
 }
 
 const (

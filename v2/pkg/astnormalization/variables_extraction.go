@@ -72,12 +72,23 @@ func (v *variablesExtractionVisitor) EnterArgument(ref int) {
 		return
 	}
 
-	uploadsMapping, err := v.uploadFinder.FindUploads(v.operation, v.definition, v.operation.Input.Variables, ref, inputValueDefinition)
-	if err != nil {
-		v.StopWithInternalErr(err)
-		return
+	// FindUploads re-parses the entire Input.Variables with astjson.ParseBytes on every
+	// argument whenever the schema declares an Upload scalar — a super-linear allocator on the
+	// aliased-batch mutation shape, on top of the sjson writes addressed by
+	// BatchExtractedVariablesJSON. monday never processes multipart file uploads at the router
+	// (the gateway resolves them before the request reaches the router), so this discovery is
+	// dead work here and its result (uploadsPath) is always empty. See
+	// mondaytweaks.DisableUploadFinding.
+	var uploadsMapping []uploads.UploadPathMapping
+	if !mondaytweaks.DisableUploadFinding {
+		var err error
+		uploadsMapping, err = v.uploadFinder.FindUploads(v.operation, v.definition, v.operation.Input.Variables, ref, inputValueDefinition)
+		if err != nil {
+			v.StopWithInternalErr(err)
+			return
+		}
+		v.uploadFinder.Reset()
 	}
-	v.uploadFinder.Reset()
 
 	if v.operation.Arguments[ref].Value.Kind == ast.ValueKindVariable {
 		if len(uploadsMapping) > 0 {

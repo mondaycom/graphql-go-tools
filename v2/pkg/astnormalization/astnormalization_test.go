@@ -16,6 +16,7 @@ import (
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astvisitor"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/internal/unsafeparser"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/internal/unsafeprinter"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/operationreport"
 )
 
@@ -1029,6 +1030,12 @@ func TestVariablesNormalizer(t *testing.T) {
 	})
 
 	t.Run("file uploads", func(t *testing.T) {
+		// Upload-path discovery is skipped by default (mondaytweaks.DisableUploadFinding); the
+		// router never handles uploads. Re-enable it here to assert the upstream mapping.
+		origDisableUploadFinding := mondaytweaks.DisableUploadFinding
+		t.Cleanup(func() { mondaytweaks.DisableUploadFinding = origDisableUploadFinding })
+		mondaytweaks.DisableUploadFinding = false
+
 		definitionDocument := unsafeparser.ParseGraphqlDocumentStringWithBaseSchema(`
 			scalar Upload
 			input Input {list: [Upload!]! value: Upload!}
