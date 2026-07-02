@@ -60,4 +60,31 @@ var (
 	// It deliberately only merges adjacent same-subgraph runs so GraphQL's serial mutation
 	// semantics are preserved across subgraph boundaries.
 	MergeContiguousMutationRootFields = true
+
+	// OptimizeVariablesExtraction linearizes the variable-extraction normalizer, whose
+	// upstream implementation is super-linear on the aliased-batch mutation shape (one
+	// anonymous mutation with N aliased root fields, all arguments inline). For such
+	// operations extraction cost is dominated by two super-linear hotspots:
+	//
+	//   1. Document.GenerateUnusedVariableDefinitionName restarts its name search from "a"
+	//      on every call and linearly scans the operation's variable definitions for each
+	//      candidate — O(N^3) over the batch. This dominates.
+	//   2. variableExists deduplicates each inline value by walking the entire (growing)
+	//      Input.Variables JSON and linearly scanning the extracted-variable list — O(N^2).
+	//
+	// Prod (US cluster group 02) saw single anonymous mutations spend 200-570ms in
+	// normalization purely on this shape, inflating tail latency and GC pressure.
+	//
+	// With this fix the visitor (single-operation documents only) generates names from a
+	// monotonic cursor that skips only pre-existing user variable names (O(1) amortized) and
+	// deduplicates via a (canonical-type, value) map (O(1) per argument), replacing the two
+	// dominant super-linear hotspots. The per-variable sjson.SetRawBytes write is
+	// intentionally retained: sjson's key placement is not a plain append, so a batched
+	// builder would emit a different (though equivalent) key order and diverge from the
+	// extraction corpus. Output is byte-identical to the upstream path; the differential test
+	// in variables_extraction_optimized_test.go asserts this across the extraction corpus
+	// plus batch shapes. Multi-operation documents fall back to the original path, where
+	// generated names are shared across operations through the shared Input.Variables buffer.
+	// When this flag is false the original path runs unchanged.
+	OptimizeVariablesExtraction = true
 )

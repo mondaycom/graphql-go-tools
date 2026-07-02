@@ -12,6 +12,7 @@ import (
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astnormalization/uploads"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astvisitor"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/internal/unsafebytes"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 )
 
 func extractVariables(walker *astvisitor.Walker) *variablesExtractionVisitor {
@@ -34,6 +35,15 @@ type variablesExtractionVisitor struct {
 	extractedVariableTypeRefs []int
 	uploadFinder              *uploads.UploadFinder
 	uploadsPath               []uploads.UploadPathMapping
+
+	// optimized-path state (mondaytweaks.OptimizeVariablesExtraction, single-operation
+	// documents only). See variables_extraction_optimized.go.
+	optimize              bool
+	preExistingNames      map[string]struct{} // user-defined variable names present before extraction
+	preExistingNamesBuilt bool
+	nameCursor            int               // monotonic index into the generated-name sequence
+	dedupIndex            map[string][]byte // key: canonicalType \x00 rawValue -> generated variable name
+	typeKeyScratch        []byte            // reused buffer for PrintTypeBytes
 }
 
 func (v *variablesExtractionVisitor) EnterArgument(ref int) {
@@ -71,20 +81,48 @@ func (v *variablesExtractionVisitor) EnterArgument(ref int) {
 		v.StopWithInternalErr(err)
 		return
 	}
-	if exists, name, _ := v.variableExists(valueBytes, inputValueDefinition); exists {
+	// dedupKey is populated only on the optimized path and reused below when a new
+	// variable is registered, so identical (type,value) pairs collapse to one variable.
+	var (
+		dedupHit  bool
+		dedupName []byte
+		dedupKey  string
+	)
+	if v.optimize {
+		if !v.preExistingNamesBuilt {
+			v.buildPreExistingNames(v.Ancestors[0].Ref)
+			v.preExistingNamesBuilt = true
+		}
+		dedupKey = v.typeValueDedupKey(inputValueDefinition, valueBytes)
+		dedupName, dedupHit = v.dedupIndex[dedupKey]
+	} else if exists, name, _ := v.variableExists(valueBytes, inputValueDefinition); exists {
+		dedupName, dedupHit = name, true
+	}
+	if dedupHit {
 		variable := ast.VariableValue{
-			Name: v.operation.Input.AppendInputBytes(name),
+			Name: v.operation.Input.AppendInputBytes(dedupName),
 		}
 		value := v.operation.AddVariableValue(variable)
 		v.operation.Arguments[ref].Value.Kind = ast.ValueKindVariable
 		v.operation.Arguments[ref].Value.Ref = value
 		return
 	}
-	variableNameBytes := v.operation.GenerateUnusedVariableDefinitionName(v.Ancestors[0].Ref)
+	var variableNameBytes []byte
+	if v.optimize {
+		variableNameBytes = v.nextGeneratedVariableName()
+	} else {
+		variableNameBytes = v.operation.GenerateUnusedVariableDefinitionName(v.Ancestors[0].Ref)
+	}
+	// The per-variable sjson write is retained on both paths: sjson's key placement is not a
+	// plain append, and reproducing its exact byte order in a batched build would diverge
+	// from the extraction corpus expectations. See mondaytweaks.OptimizeVariablesExtraction.
 	v.operation.Input.Variables, err = sjson.SetRawBytes(v.operation.Input.Variables, unsafebytes.BytesToString(variableNameBytes), valueBytes)
 	if err != nil {
 		v.StopWithInternalErr(err)
 		return
+	}
+	if v.optimize {
+		v.dedupIndex[dedupKey] = variableNameBytes
 	}
 
 	if len(uploadsMapping) > 0 {
@@ -147,6 +185,22 @@ func (v *variablesExtractionVisitor) EnterDocument(operation, definition *ast.Do
 	v.operation, v.definition = operation, definition
 	v.extractedVariables = v.extractedVariables[:0]
 	v.extractedVariableTypeRefs = v.extractedVariableTypeRefs[:0]
+
+	// The optimized path preserves byte-identical output only for single-operation
+	// documents; multi-operation documents share generated names across operations
+	// through the shared Input.Variables buffer, so they keep the original path.
+	v.optimize = mondaytweaks.OptimizeVariablesExtraction && operation.NumOfOperationDefinitions() == 1
+	v.preExistingNamesBuilt = false
+	v.nameCursor = 0
+	if v.optimize {
+		if v.preExistingNames == nil {
+			v.preExistingNames = make(map[string]struct{})
+			v.dedupIndex = make(map[string][]byte)
+		} else {
+			clear(v.preExistingNames)
+			clear(v.dedupIndex)
+		}
+	}
 }
 
 func (v *variablesExtractionVisitor) variableExists(variableValue []byte, inputValueDefinition int) (exists bool, name []byte, definition int) {
