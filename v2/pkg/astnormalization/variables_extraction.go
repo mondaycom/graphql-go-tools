@@ -21,6 +21,7 @@ func extractVariables(walker *astvisitor.Walker) *variablesExtractionVisitor {
 		uploadFinder: uploads.NewUploadFinder(),
 	}
 	walker.RegisterEnterDocumentVisitor(visitor)
+	walker.RegisterLeaveDocumentVisitor(visitor)
 	walker.RegisterEnterArgumentVisitor(visitor)
 	return visitor
 }
@@ -44,6 +45,15 @@ type variablesExtractionVisitor struct {
 	nameCursor            int               // monotonic index into the generated-name sequence
 	dedupIndex            map[string][]byte // key: canonicalType \x00 rawValue -> generated variable name
 	typeKeyScratch        []byte            // reused buffer for PrintTypeBytes
+
+	// batched Input.Variables build (mondaytweaks.BatchExtractedVariablesJSON, optimized path
+	// only). Extracted (name,value) pairs are buffered here in first-occurrence order and
+	// flushed into Input.Variables once at LeaveDocument, reproducing sjson's prepend order
+	// (reverse of creation) in O(total bytes) instead of O(N^2). See
+	// flushBatchedExtractedVariables in variables_extraction_optimized.go.
+	batchVarsJSON    bool
+	pendingVarNames  [][]byte
+	pendingVarValues [][]byte
 }
 
 func (v *variablesExtractionVisitor) EnterArgument(ref int) {
@@ -113,13 +123,22 @@ func (v *variablesExtractionVisitor) EnterArgument(ref int) {
 	} else {
 		variableNameBytes = v.operation.GenerateUnusedVariableDefinitionName(v.Ancestors[0].Ref)
 	}
-	// The per-variable sjson write is retained on both paths: sjson's key placement is not a
-	// plain append, and reproducing its exact byte order in a batched build would diverge
-	// from the extraction corpus expectations. See mondaytweaks.OptimizeVariablesExtraction.
-	v.operation.Input.Variables, err = sjson.SetRawBytes(v.operation.Input.Variables, unsafebytes.BytesToString(variableNameBytes), valueBytes)
-	if err != nil {
-		v.StopWithInternalErr(err)
-		return
+	// Register the new variable. The default path writes it into Input.Variables immediately
+	// via sjson.SetRawBytes (which re-serialises the whole buffer, O(N) per write, O(N^2)
+	// over the batch). The batched path instead buffers the (name,value) pair and defers a
+	// single build to LeaveDocument. Deferral is safe because no later inline value can
+	// reference a just-generated variable name, so uploads.FindUploads — the only reader of
+	// Input.Variables on this path — needs only the original client variables, which stay
+	// untouched during the walk. See mondaytweaks.BatchExtractedVariablesJSON.
+	if v.batchVarsJSON {
+		v.pendingVarNames = append(v.pendingVarNames, variableNameBytes)
+		v.pendingVarValues = append(v.pendingVarValues, valueBytes)
+	} else {
+		v.operation.Input.Variables, err = sjson.SetRawBytes(v.operation.Input.Variables, unsafebytes.BytesToString(variableNameBytes), valueBytes)
+		if err != nil {
+			v.StopWithInternalErr(err)
+			return
+		}
 	}
 	if v.optimize {
 		v.dedupIndex[dedupKey] = variableNameBytes
@@ -192,6 +211,9 @@ func (v *variablesExtractionVisitor) EnterDocument(operation, definition *ast.Do
 	v.optimize = mondaytweaks.OptimizeVariablesExtraction && operation.NumOfOperationDefinitions() == 1
 	v.preExistingNamesBuilt = false
 	v.nameCursor = 0
+	v.batchVarsJSON = v.optimize && mondaytweaks.BatchExtractedVariablesJSON
+	v.pendingVarNames = v.pendingVarNames[:0]
+	v.pendingVarValues = v.pendingVarValues[:0]
 	if v.optimize {
 		if v.preExistingNames == nil {
 			v.preExistingNames = make(map[string]struct{})

@@ -78,13 +78,35 @@ var (
 	// With this fix the visitor (single-operation documents only) generates names from a
 	// monotonic cursor that skips only pre-existing user variable names (O(1) amortized) and
 	// deduplicates via a (canonical-type, value) map (O(1) per argument), replacing the two
-	// dominant super-linear hotspots. The per-variable sjson.SetRawBytes write is
-	// intentionally retained: sjson's key placement is not a plain append, so a batched
-	// builder would emit a different (though equivalent) key order and diverge from the
-	// extraction corpus. Output is byte-identical to the upstream path; the differential test
-	// in variables_extraction_optimized_test.go asserts this across the extraction corpus
-	// plus batch shapes. Multi-operation documents fall back to the original path, where
-	// generated names are shared across operations through the shared Input.Variables buffer.
-	// When this flag is false the original path runs unchanged.
+	// dominant super-linear hotspots. The remaining per-variable sjson.SetRawBytes write is
+	// addressed separately by BatchExtractedVariablesJSON. Output is byte-identical to the
+	// upstream path; the differential test in variables_extraction_optimized_test.go asserts
+	// this across the extraction corpus plus batch shapes. Multi-operation documents fall back
+	// to the original path, where generated names are shared across operations through the
+	// shared Input.Variables buffer. When this flag is false the original path runs unchanged.
 	OptimizeVariablesExtraction = true
+
+	// BatchExtractedVariablesJSON removes the per-variable sjson.SetRawBytes write in the
+	// variable-extraction normalizer. Each sjson.SetRawBytes call re-parses and re-serialises
+	// the entire (growing) Input.Variables buffer, so extracting N inline arguments copies
+	// O(N^2) bytes; on the aliased-batch mutation shape sjson.appendRawPaths was the single
+	// largest transient allocator in the extraction profile (~40% of allocations).
+	//
+	// With this flag the optimized path buffers each extracted (name,value) pair in
+	// first-occurrence order and defers a single Input.Variables build to LeaveDocument
+	// (flushBatchedExtractedVariables), replacing N growing re-serialisations with one
+	// O(total bytes) pass. Deferral is safe: no inline value can reference a just-generated
+	// variable name, so uploads.FindUploads — the only reader of Input.Variables on this path
+	// — needs only the original client variables, which stay untouched during the walk.
+	//
+	// The build is byte-identical to the sjson path, not merely semantically equal. sjson
+	// inserts each not-yet-present top-level key at the FRONT of the object, so after N
+	// sequential inserts the extracted variables appear in reverse creation order ahead of any
+	// pre-existing client variables; the deferred build emits exactly that order. The
+	// differential test in variables_extraction_optimized_test.go asserts byte-identity across
+	// the extraction corpus and batch shapes with this flag toggled, and the upstream
+	// byte-exact corpus (TestVariablesExtraction, TestInputCoercionForList, TestNormalizeOperation)
+	// passes with it enabled. Only takes effect when OptimizeVariablesExtraction is also enabled
+	// (single-operation documents); when false the per-variable sjson write runs unchanged.
+	BatchExtractedVariablesJSON = true
 )
