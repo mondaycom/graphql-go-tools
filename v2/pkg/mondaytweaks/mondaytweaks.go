@@ -109,4 +109,23 @@ var (
 	// passes with it enabled. Only takes effect when OptimizeVariablesExtraction is also enabled
 	// (single-operation documents); when false the per-variable sjson write runs unchanged.
 	BatchExtractedVariablesJSON = true
+
+	// DisableUploadFinding skips the per-argument upload-discovery pass in the variable-
+	// extraction normalizer (uploads.FindUploads). Whenever the schema declares an Upload
+	// scalar — which the federated router schema does — that pass calls astjson.ParseBytes on
+	// Input.Variables once per argument. On the aliased-batch mutation shape (one anonymous
+	// mutation with N aliased root fields) that was originally O(N^2): the pre-batch path grew
+	// Input.Variables with each sjson write, so every re-parse saw a larger buffer.
+	// BatchExtractedVariablesJSON keeps the buffer constant during the walk, reducing it to N
+	// redundant parses (~8 allocations each, O(N*|variables|)); it is still a second per-
+	// argument allocator on the same shape.
+	//
+	// monday never processes multipart file uploads at the router: the gateway resolves
+	// uploads before the request reaches the router, so no router request carries an Upload,
+	// the discovered upload-path mapping is always empty, and the pass is pure overhead. With
+	// this flag the FindUploads call is skipped entirely — the mapping stays empty, exactly the
+	// result it would compute — removing all N parses (benchmark: N=200 sheds ~1,600 allocs).
+	// When false the original per-argument pass runs unchanged; tests that exercise upload
+	// discovery flip it off to assert the upstream behavior.
+	DisableUploadFinding = true
 )

@@ -8,6 +8,7 @@ import (
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/asttransform"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astvisitor"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/internal/unsafeparser"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/operationreport"
 )
 
@@ -38,8 +39,17 @@ func buildAliasedBatchMutation(n int) string {
 	return b.String()
 }
 
+// benchExtractionSchemaWithUpload adds an Upload scalar so uploads.FindUploads engages its full
+// per-argument astjson.ParseBytes pass (NodeByName("Upload") succeeds), matching the federated
+// router schema. Used to measure the overhead mondaytweaks.DisableUploadFinding removes.
+const benchExtractionSchemaWithUpload = benchExtractionSchema + "\nscalar Upload\n"
+
 func benchmarkExtraction(b *testing.B, n int) {
-	def := unsafeparser.ParseGraphqlDocumentString(benchExtractionSchema)
+	benchmarkExtractionSchema(b, benchExtractionSchema, n)
+}
+
+func benchmarkExtractionSchema(b *testing.B, schema string, n int) {
+	def := unsafeparser.ParseGraphqlDocumentString(schema)
 	if err := asttransform.MergeDefinitionWithBaseSchema(&def); err != nil {
 		b.Fatal(err)
 	}
@@ -67,5 +77,22 @@ func BenchmarkVariablesExtraction_AliasedBatch(b *testing.B) {
 		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
 			benchmarkExtraction(b, n)
 		})
+	}
+}
+
+// BenchmarkVariablesExtraction_UploadFinding measures the per-argument uploads.FindUploads pass
+// on an Upload-bearing schema (as the router schema is) for the aliased-batch shape, comparing
+// the default (mondaytweaks.DisableUploadFinding on) against the upstream pass. Run with
+// -benchmem to see the astjson.ParseBytes allocations the flag removes.
+func BenchmarkVariablesExtraction_UploadFinding(b *testing.B) {
+	origDisableUploadFinding := mondaytweaks.DisableUploadFinding
+	b.Cleanup(func() { mondaytweaks.DisableUploadFinding = origDisableUploadFinding })
+
+	for _, n := range []int{25, 50, 100, 200} {
+		mondaytweaks.DisableUploadFinding = false
+		b.Run(fmt.Sprintf("finding/N=%d", n), func(b *testing.B) { benchmarkExtractionSchema(b, benchExtractionSchemaWithUpload, n) })
+
+		mondaytweaks.DisableUploadFinding = true
+		b.Run(fmt.Sprintf("skipped/N=%d", n), func(b *testing.B) { benchmarkExtractionSchema(b, benchExtractionSchemaWithUpload, n) })
 	}
 }
