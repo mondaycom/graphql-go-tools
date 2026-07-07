@@ -33,6 +33,10 @@ type pathBuilderVisitor struct {
 
 	planners                  []PlannerConfiguration // pathBuilderVisitor is building this list of planners
 	mutationRootFieldPlanners []int                  // mutationRootFieldPlanners is a list of root mutation planner ids
+	// mutationRootPlannerFieldNames parallels mutationRootFieldPlanners: contiguous merge is only
+	// valid for aliased repeats of the same root field (e.g. batch change_column_value), not
+	// different mutation roots that must execute serially (d, c, b).
+	mutationRootPlannerFieldNames []string
 
 	nodeSuggestions *NodeSuggestions // nodeSuggestions holds information about suggested data sources for each field
 
@@ -336,6 +340,12 @@ func (c *pathBuilderVisitor) EnterDocument(operation, definition *ast.Document) 
 		c.mutationRootFieldPlanners = make([]int, 0, 2)
 	} else {
 		c.mutationRootFieldPlanners = c.mutationRootFieldPlanners[:0]
+	}
+
+	if c.mutationRootPlannerFieldNames == nil {
+		c.mutationRootPlannerFieldNames = make([]string, 0, 2)
+	} else {
+		c.mutationRootPlannerFieldNames = c.mutationRootPlannerFieldNames[:0]
 	}
 
 	c.missingPathTracker = make(map[string]struct{})
@@ -926,6 +936,10 @@ func (c *pathBuilderVisitor) planMutationRootWithPreviousPlanner(field *currentF
 		return -1, false
 	}
 
+	if len(c.mutationRootPlannerFieldNames) == 0 || field.fieldName != c.mutationRootPlannerFieldNames[len(c.mutationRootPlannerFieldNames)-1] {
+		return -1, false
+	}
+
 	plannerConfig := c.planners[previousPlannerIdx]
 	dsConfiguration := plannerConfig.DataSourceConfiguration()
 	if suggestion.DataSourceHash != dsConfiguration.Hash() {
@@ -1112,6 +1126,7 @@ func (c *pathBuilderVisitor) addNewPlanner(field *currentFieldInfo, isMutationRo
 			fetchConfiguration.dependsOnFetchIDs = append(fetchConfiguration.dependsOnFetchIDs, c.mutationRootFieldPlanners...)
 		}
 		c.mutationRootFieldPlanners = append(c.mutationRootFieldPlanners, nextPlannerId)
+		c.mutationRootPlannerFieldNames = append(c.mutationRootPlannerFieldNames, field.fieldName)
 	}
 
 	plannerPathConfig := newPlannerPathsConfiguration(
