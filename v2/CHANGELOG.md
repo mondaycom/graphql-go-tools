@@ -1,5 +1,51 @@
 # Changelog
 
+## [2.9.1](https://github.com/wundergraph/graphql-go-tools/compare/v2.9.0...v2.9.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* do not charge children of null-parents ([#1574](https://github.com/wundergraph/graphql-go-tools/issues/1574)) ([cf436ec](https://github.com/wundergraph/graphql-go-tools/commit/cf436ec42bd6d5755429d93f8bcd5ea6ccb88be5))
+
+## [2.9.0](https://github.com/wundergraph/graphql-go-tools/compare/v2.8.0...v2.9.0) (2026-07-06)
+
+
+### Features
+
+* add flag SkipNullVariablesError ([#1550](https://github.com/wundergraph/graphql-go-tools/issues/1550)) ([43e0087](https://github.com/wundergraph/graphql-go-tools/commit/43e00874da9edbc0a6eefa921a888c3f0edfa643))
+* support requires for conflicting arguments ([#1566](https://github.com/wundergraph/graphql-go-tools/issues/1566)) ([979ee23](https://github.com/wundergraph/graphql-go-tools/commit/979ee23f62a6d4ca9d7b4c8d1915671a53dc02b2))
+
+## [2.8.0](https://github.com/wundergraph/graphql-go-tools/compare/v2.7.0...v2.8.0) (2026-07-02)
+
+
+### Features
+
+* add defer support part 4 ([#1547](https://github.com/wundergraph/graphql-go-tools/issues/1547)) ([8891a0e](https://github.com/wundergraph/graphql-go-tools/commit/8891a0e9e606a3b3055e671a48a9e7bbc5a928ea))
+
+## [2.7.0](https://github.com/wundergraph/graphql-go-tools/compare/v2.6.0...v2.7.0) (2026-07-02)
+
+
+### Features
+
+* expose concurrency limits and inflight resolves ([#1501](https://github.com/wundergraph/graphql-go-tools/issues/1501)) ([c9af890](https://github.com/wundergraph/graphql-go-tools/commit/c9af890f1e51726c1b46f426e6392cededf5d232))
+
+
+### Bug Fixes
+
+* fix provides on abstract types ([#1564](https://github.com/wundergraph/graphql-go-tools/issues/1564)) ([8244558](https://github.com/wundergraph/graphql-go-tools/commit/8244558da7c05192c6a238b9f1a843c88e03fe38))
+
+## [2.6.0](https://github.com/wundergraph/graphql-go-tools/compare/v2.5.1...v2.6.0) (2026-07-02)
+
+
+### Features
+
+* add SubscriptionOnCreate hook ([#1538](https://github.com/wundergraph/graphql-go-tools/issues/1538)) ([3f30cb2](https://github.com/wundergraph/graphql-go-tools/commit/3f30cb240926ceff846c6ca5be7cd580408f60bb))
+
+
+### Bug Fixes
+
+* allow provides on abstract types ([#1552](https://github.com/wundergraph/graphql-go-tools/issues/1552)) ([fb2d52a](https://github.com/wundergraph/graphql-go-tools/commit/fb2d52a852bdeb53bd988f9d8000734f7297562b))
+
 ## [2.5.1](https://github.com/wundergraph/graphql-go-tools/compare/v2.5.0...v2.5.1) (2026-06-30)
 
 
