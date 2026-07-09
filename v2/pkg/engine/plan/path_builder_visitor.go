@@ -675,7 +675,7 @@ func (c *pathBuilderVisitor) handlePlanningField(field *currentFieldInfo) {
 	// mutation root fields should always be planned on a new planner
 	// because mutations must be executed sequentially
 	if isMutationRoot {
-		if mondaytweaks.MergeContiguousMutationRootFields {
+		if mondaytweaks.MergeContiguousMutationRootFields.Load() {
 			plannerIdx, planned = c.planMutationRootWithPreviousPlanner(field)
 		}
 		if !planned {

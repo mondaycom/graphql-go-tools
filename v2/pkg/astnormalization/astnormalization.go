@@ -351,7 +351,7 @@ func (o *OperationNormalizer) setupOperationWalkers() {
 		inputCoercionForList(&variablesProcessing)
 		extractVariablesDefaultValue(&variablesProcessing)
 		injectInputFieldDefaults(&variablesProcessing)
-		if mondaytweaks.CoerceNullVariablesWithDefaults {
+		if mondaytweaks.CoerceNullVariablesWithDefaults.Load() {
 			coerceNullVariablesWithDefaults(&variablesProcessing)
 		}
 
@@ -470,7 +470,7 @@ func (v *VariablesNormalizer) NormalizeOperation(operation, definition *ast.Docu
 	}
 	v.fourthCoerce.Walk(operation, definition, report)
 
-	if mondaytweaks.CoerceNullVariablesWithDefaults {
+	if mondaytweaks.CoerceNullVariablesWithDefaults.Load() {
 		if report.HasErrors() {
 			return nil
 		}

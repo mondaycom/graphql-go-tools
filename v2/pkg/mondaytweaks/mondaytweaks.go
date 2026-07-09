@@ -1,14 +1,21 @@
-// Package mondaytweaks defines compile-time feature flags for monday.com-specific
+// Package mondaytweaks defines runtime-configurable feature flags for monday.com-specific
 // behavioural overrides. Both the astnormalization and engine packages import this
 // package so all monday-specific toggles live in one place.
+//
+// All flags are backed by sync/atomic so they are safe to read from concurrent
+// request-handling goroutines and to write from the ignite provisioning goroutine.
+// Use Flag.Store(v) to change a value (e.g. from an ignite module at boot) and
+// Flag.Load() in production code paths.
 package mondaytweaks
 
-const (
+import "sync/atomic"
+
+var (
 	// CoerceNullVariablesWithDefaults enables the null variable coercion normalizer.
 	// When a nullable variable is explicitly null and used in a non-null argument position
 	// that has a schema default, the variable reference is split so the subgraph treats it
 	// as "not provided" and applies the schema default — matching Apollo Router behavior.
-	CoerceNullVariablesWithDefaults = true
+	CoerceNullVariablesWithDefaults atomic.Bool
 
 	// SkipEntityResolutionPlannerCostForParentField prevents entity-resolution planners from
 	// inflating the cost of the parent list field they traverse through. When a field (e.g.
@@ -23,7 +30,7 @@ const (
 	// With this fix, getFieldDataSourceHashes skips any planner that does not own the field
 	// via a PathTypeField entry (HasPathWithFieldRef), i.e. planners that merely traverse
 	// through the field to reach a child.
-	SkipEntityResolutionPlannerCostForParentField = true
+	SkipEntityResolutionPlannerCostForParentField atomic.Bool
 
 	// CloseWSConnectionsOnContextCancel makes the WSTransport forcibly close all active
 	// WebSocket connections when its parent context is cancelled. Without this, the pingLoop
@@ -31,7 +38,7 @@ const (
 	// protocol.Read(context.Background()) — stay alive indefinitely, pinning the entire
 	// object chain (WSTransport → SubscriptionClient → Factory → DataSources → PlanConfig →
 	// Executor → RouterSchema *ast.Document ~200MB) until the remote end closes the socket.
-	CloseWSConnectionsOnContextCancel = true
+	CloseWSConnectionsOnContextCancel atomic.Bool
 
 	// MemoizeFetchDependencyOrdering switches orderSequenceByDependencies.ProcessFetchTree
 	// to a memoized fetch-ordering algorithm. The upstream implementation sorts fetch-tree
@@ -47,11 +54,11 @@ const (
 	// comparator reads the precomputed sets. The comparator logic is byte-identical to the
 	// upstream path, so output ordering is unchanged. When this flag is false the original
 	// recursive path runs unchanged.
-	MemoizeFetchDependencyOrdering = true
+	MemoizeFetchDependencyOrdering atomic.Bool
 
 	// ApolloRouterCompatibilitySubrequestHTTPError makes the Loader attach the SUBREQUEST_HTTP_ERROR
 	// code to non-2XX responses with no GraphQL errors body. This is a compatibility mode for Apollo Router.
-	ApolloRouterCompatibilitySubrequestHTTPError = true
+	ApolloRouterCompatibilitySubrequestHTTPError atomic.Bool
 
 	// EnableSizedArenaPool switches request arenas in the resolve package to the
 	// size-classed, retention-bounded pool (resolve.sizedArenaPool). The upstream
@@ -61,26 +68,24 @@ const (
 	// response (~680MB in the retention benchmark; the sized pool holds
 	// ~90-120MB, -83%, with unchanged throughput). Flip to false to fall back to
 	// the upstream pool in case a workload regresses.
-	EnableSizedArenaPool = true
-)
+	EnableSizedArenaPool atomic.Bool
 
-var (
 	// MergeContiguousMutationRootFields allows contiguous mutation root fields planned on
 	// the same subgraph to share one upstream mutation fetch while preserving alias order.
 	// It deliberately only merges adjacent same-subgraph runs so GraphQL's serial mutation
 	// semantics are preserved across subgraph boundaries.
-	MergeContiguousMutationRootFields = true
+	MergeContiguousMutationRootFields atomic.Bool
 
 	// OptimizeVariablesExtraction linearizes the variable-extraction normalizer, whose
 	// upstream implementation is super-linear on the aliased-batch mutation shape (one
 	// anonymous mutation with N aliased root fields, all arguments inline). For such
 	// operations extraction cost is dominated by two super-linear hotspots:
 	//
-	//   1. Document.GenerateUnusedVariableDefinitionName restarts its name search from "a"
-	//      on every call and linearly scans the operation's variable definitions for each
-	//      candidate — O(N^3) over the batch. This dominates.
-	//   2. variableExists deduplicates each inline value by walking the entire (growing)
-	//      Input.Variables JSON and linearly scanning the extracted-variable list — O(N^2).
+	//  1. Document.GenerateUnusedVariableDefinitionName restarts its name search from "a"
+	//     on every call and linearly scans the operation's variable definitions for each
+	//     candidate — O(N^3) over the batch. This dominates.
+	//  2. variableExists deduplicates each inline value by walking the entire (growing)
+	//     Input.Variables JSON and linearly scanning the extracted-variable list — O(N^2).
 	//
 	// Prod (US cluster group 02) saw single anonymous mutations spend 200-570ms in
 	// normalization purely on this shape, inflating tail latency and GC pressure.
@@ -94,7 +99,7 @@ var (
 	// this across the extraction corpus plus batch shapes. Multi-operation documents fall back
 	// to the original path, where generated names are shared across operations through the
 	// shared Input.Variables buffer. When this flag is false the original path runs unchanged.
-	OptimizeVariablesExtraction = true
+	OptimizeVariablesExtraction atomic.Bool
 
 	// BatchExtractedVariablesJSON removes the per-variable sjson.SetRawBytes write in the
 	// variable-extraction normalizer. Each sjson.SetRawBytes call re-parses and re-serialises
@@ -118,7 +123,7 @@ var (
 	// byte-exact corpus (TestVariablesExtraction, TestInputCoercionForList, TestNormalizeOperation)
 	// passes with it enabled. Only takes effect when OptimizeVariablesExtraction is also enabled
 	// (single-operation documents); when false the per-variable sjson write runs unchanged.
-	BatchExtractedVariablesJSON = true
+	BatchExtractedVariablesJSON atomic.Bool
 
 	// DisableUploadFinding skips the per-argument upload-discovery pass in the variable-
 	// extraction normalizer (uploads.FindUploads). Whenever the schema declares an Upload
@@ -137,5 +142,18 @@ var (
 	// result it would compute — removing all N parses (benchmark: N=200 sheds ~1,600 allocs).
 	// When false the original per-argument pass runs unchanged; tests that exercise upload
 	// discovery flip it off to assert the upstream behavior.
-	DisableUploadFinding = true
+	DisableUploadFinding atomic.Bool
 )
+
+func init() {
+	CoerceNullVariablesWithDefaults.Store(true)
+	SkipEntityResolutionPlannerCostForParentField.Store(true)
+	CloseWSConnectionsOnContextCancel.Store(true)
+	MemoizeFetchDependencyOrdering.Store(true)
+	ApolloRouterCompatibilitySubrequestHTTPError.Store(true)
+	EnableSizedArenaPool.Store(true)
+	MergeContiguousMutationRootFields.Store(true)
+	OptimizeVariablesExtraction.Store(true)
+	BatchExtractedVariablesJSON.Store(true)
+	DisableUploadFinding.Store(true)
+}

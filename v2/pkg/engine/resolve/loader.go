@@ -1225,7 +1225,7 @@ func (l *Loader) renderErrorsFailedToFetch(fetchItem *FetchItem, res *result, re
 
 	// Wrap the error in a SUBREQUEST_HTTP_ERROR code if the Apollo Router compatibility mode is enabled
 	// This way we can avoid exposing subgraph architecture to clients
-	if mondaytweaks.ApolloRouterCompatibilitySubrequestHTTPError && l.apolloRouterCompatibilitySubrequestHTTPError && res.statusCode >= 400 {
+	if mondaytweaks.ApolloRouterCompatibilitySubrequestHTTPError.Load() && l.apolloRouterCompatibilitySubrequestHTTPError && res.statusCode >= 400 {
 		return l.addApolloRouterCompatibilityError(res)
 	}
 
@@ -1255,7 +1255,7 @@ func (l *Loader) renderErrorsStatusFallback(fetchItem *FetchItem, res *result, s
 	// When that compatibility mode is enabled for a server/client error, emit the same
 	// coded error here instead of a bare status message so status-only failures are shaped
 	// identically to the errors-body path and downstream consumers can normalize them.
-	if mondaytweaks.ApolloRouterCompatibilitySubrequestHTTPError && l.apolloRouterCompatibilitySubrequestHTTPError && statusCode >= 400 {
+	if mondaytweaks.ApolloRouterCompatibilitySubrequestHTTPError.Load() && l.apolloRouterCompatibilitySubrequestHTTPError && statusCode >= 400 {
 		return l.addApolloRouterCompatibilityError(res)
 	}
 

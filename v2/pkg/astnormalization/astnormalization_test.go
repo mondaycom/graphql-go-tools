@@ -1265,9 +1265,9 @@ func TestVariablesNormalizer(t *testing.T) {
 	t.Run("file uploads", func(t *testing.T) {
 		// Upload-path discovery is skipped by default (mondaytweaks.DisableUploadFinding); the
 		// router never handles uploads. Re-enable it here to assert the upstream mapping.
-		origDisableUploadFinding := mondaytweaks.DisableUploadFinding
-		t.Cleanup(func() { mondaytweaks.DisableUploadFinding = origDisableUploadFinding })
-		mondaytweaks.DisableUploadFinding = false
+		origDisableUploadFinding := mondaytweaks.DisableUploadFinding.Load()
+		t.Cleanup(func() { mondaytweaks.DisableUploadFinding.Store(origDisableUploadFinding) })
+		mondaytweaks.DisableUploadFinding.Store(false)
 
 		definitionDocument := unsafeparser.ParseGraphqlDocumentStringWithBaseSchema(`
 			scalar Upload

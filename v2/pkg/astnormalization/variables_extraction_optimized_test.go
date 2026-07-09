@@ -100,15 +100,15 @@ func extractionCorpus() []extractionCorpusEntry {
 }
 
 func TestVariablesExtraction_OptimizedMatchesOriginal(t *testing.T) {
-	original := mondaytweaks.OptimizeVariablesExtraction
-	t.Cleanup(func() { mondaytweaks.OptimizeVariablesExtraction = original })
+	original := mondaytweaks.OptimizeVariablesExtraction.Load()
+	t.Cleanup(func() { mondaytweaks.OptimizeVariablesExtraction.Store(original) })
 
 	for _, c := range extractionCorpus() {
 		t.Run(c.name, func(t *testing.T) {
-			mondaytweaks.OptimizeVariablesExtraction = false
+			mondaytweaks.OptimizeVariablesExtraction.Store(false)
 			astOrig, varsOrig := extractOnce(t, c.definition, c.operation)
 
-			mondaytweaks.OptimizeVariablesExtraction = true
+			mondaytweaks.OptimizeVariablesExtraction.Store(true)
 			astOpt, varsOpt := extractOnce(t, c.definition, c.operation)
 
 			assert.Equal(t, astOrig, astOpt, "printed AST diverges between original and optimized paths")
@@ -120,17 +120,17 @@ func TestVariablesExtraction_OptimizedMatchesOriginal(t *testing.T) {
 // TestVariablesExtraction_MultiOperationFallsBack verifies multi-operation documents (where
 // the optimized path is intentionally disabled) still match the original path exactly.
 func TestVariablesExtraction_MultiOperationFallsBack(t *testing.T) {
-	original := mondaytweaks.OptimizeVariablesExtraction
-	t.Cleanup(func() { mondaytweaks.OptimizeVariablesExtraction = original })
+	original := mondaytweaks.OptimizeVariablesExtraction.Load()
+	t.Cleanup(func() { mondaytweaks.OptimizeVariablesExtraction.Store(original) })
 
 	const op = `
 		mutation A { bar(string: "foo") baz(int: 1) }
 		mutation B { bar(string: "foo") baz(int: 2) }`
 
-	mondaytweaks.OptimizeVariablesExtraction = false
+	mondaytweaks.OptimizeVariablesExtraction.Store(false)
 	astOrig, varsOrig := extractOnce(t, sameVariableExtraction, op)
 
-	mondaytweaks.OptimizeVariablesExtraction = true
+	mondaytweaks.OptimizeVariablesExtraction.Store(true)
 	astOpt, varsOpt := extractOnce(t, sameVariableExtraction, op)
 
 	assert.Equal(t, astOrig, astOpt)
@@ -144,23 +144,23 @@ func TestVariablesExtraction_MultiOperationFallsBack(t *testing.T) {
 // printed AST and the variables JSON both match the sjson path exactly. This byte-identity is
 // what lets the flag default on without touching the upstream byte-exact extraction corpus.
 func TestVariablesExtraction_BatchedMatchesSjson(t *testing.T) {
-	origOptimize := mondaytweaks.OptimizeVariablesExtraction
-	origBatch := mondaytweaks.BatchExtractedVariablesJSON
+	origOptimize := mondaytweaks.OptimizeVariablesExtraction.Load()
+	origBatch := mondaytweaks.BatchExtractedVariablesJSON.Load()
 	t.Cleanup(func() {
-		mondaytweaks.OptimizeVariablesExtraction = origOptimize
-		mondaytweaks.BatchExtractedVariablesJSON = origBatch
+		mondaytweaks.OptimizeVariablesExtraction.Store(origOptimize)
+		mondaytweaks.BatchExtractedVariablesJSON.Store(origBatch)
 	})
 
 	// Both configurations run the optimized name/dedup path; only the Input.Variables writer
 	// differs (per-variable sjson vs the deferred batched build).
-	mondaytweaks.OptimizeVariablesExtraction = true
+	mondaytweaks.OptimizeVariablesExtraction.Store(true)
 
 	for _, c := range extractionCorpus() {
 		t.Run(c.name, func(t *testing.T) {
-			mondaytweaks.BatchExtractedVariablesJSON = false
+			mondaytweaks.BatchExtractedVariablesJSON.Store(false)
 			astSjson, varsSjson := extractOnce(t, c.definition, c.operation)
 
-			mondaytweaks.BatchExtractedVariablesJSON = true
+			mondaytweaks.BatchExtractedVariablesJSON.Store(true)
 			astBatched, varsBatched := extractOnce(t, c.definition, c.operation)
 
 			assert.Equal(t, astSjson, astBatched, "printed AST diverges between sjson and batched paths")
@@ -174,13 +174,13 @@ func TestVariablesExtraction_BatchedMatchesSjson(t *testing.T) {
 // generated name. sjson overwrites it in place; the batched build must reproduce that (rather
 // than emit a duplicate key). Both paths must land on the same bytes.
 func TestVariablesExtraction_BatchedOverwritesCollidingSeededVariable(t *testing.T) {
-	origOptimize := mondaytweaks.OptimizeVariablesExtraction
-	origBatch := mondaytweaks.BatchExtractedVariablesJSON
+	origOptimize := mondaytweaks.OptimizeVariablesExtraction.Load()
+	origBatch := mondaytweaks.BatchExtractedVariablesJSON.Load()
 	t.Cleanup(func() {
-		mondaytweaks.OptimizeVariablesExtraction = origOptimize
-		mondaytweaks.BatchExtractedVariablesJSON = origBatch
+		mondaytweaks.OptimizeVariablesExtraction.Store(origOptimize)
+		mondaytweaks.BatchExtractedVariablesJSON.Store(origBatch)
 	})
-	mondaytweaks.OptimizeVariablesExtraction = true
+	mondaytweaks.OptimizeVariablesExtraction.Store(true)
 
 	const definition = sameVariableExtraction
 	// Two inline args extract to generated names a and b; the seeded object already carries a
@@ -204,10 +204,10 @@ func TestVariablesExtraction_BatchedOverwritesCollidingSeededVariable(t *testing
 		return printed, string(op.Input.Variables)
 	}
 
-	mondaytweaks.BatchExtractedVariablesJSON = false
+	mondaytweaks.BatchExtractedVariablesJSON.Store(false)
 	astSjson, varsSjson := run()
 
-	mondaytweaks.BatchExtractedVariablesJSON = true
+	mondaytweaks.BatchExtractedVariablesJSON.Store(true)
 	astBatched, varsBatched := run()
 
 	assert.Equal(t, astSjson, astBatched)
@@ -217,14 +217,14 @@ func TestVariablesExtraction_BatchedOverwritesCollidingSeededVariable(t *testing
 // BenchmarkVariablesExtraction_OptimizedVsOriginal runs the batch shape under both paths so
 // the speedup is directly comparable.
 func BenchmarkVariablesExtraction_OptimizedVsOriginal(b *testing.B) {
-	original := mondaytweaks.OptimizeVariablesExtraction
-	b.Cleanup(func() { mondaytweaks.OptimizeVariablesExtraction = original })
+	original := mondaytweaks.OptimizeVariablesExtraction.Load()
+	b.Cleanup(func() { mondaytweaks.OptimizeVariablesExtraction.Store(original) })
 
 	for _, n := range []int{25, 50, 100, 200} {
-		mondaytweaks.OptimizeVariablesExtraction = false
+		mondaytweaks.OptimizeVariablesExtraction.Store(false)
 		b.Run(fmt.Sprintf("original/N=%d", n), func(b *testing.B) { benchmarkExtraction(b, n) })
 
-		mondaytweaks.OptimizeVariablesExtraction = true
+		mondaytweaks.OptimizeVariablesExtraction.Store(true)
 		b.Run(fmt.Sprintf("optimized/N=%d", n), func(b *testing.B) { benchmarkExtraction(b, n) })
 	}
 }
@@ -234,20 +234,20 @@ func BenchmarkVariablesExtraction_OptimizedVsOriginal(b *testing.B) {
 // (O(N^2) bytes copied) versus the in-place append (O(N) amortised). Run with -benchmem to see
 // the allocation reduction that motivated BatchExtractedVariablesJSON.
 func BenchmarkVariablesExtraction_SjsonVsBatched(b *testing.B) {
-	origOptimize := mondaytweaks.OptimizeVariablesExtraction
-	origBatch := mondaytweaks.BatchExtractedVariablesJSON
+	origOptimize := mondaytweaks.OptimizeVariablesExtraction.Load()
+	origBatch := mondaytweaks.BatchExtractedVariablesJSON.Load()
 	b.Cleanup(func() {
-		mondaytweaks.OptimizeVariablesExtraction = origOptimize
-		mondaytweaks.BatchExtractedVariablesJSON = origBatch
+		mondaytweaks.OptimizeVariablesExtraction.Store(origOptimize)
+		mondaytweaks.BatchExtractedVariablesJSON.Store(origBatch)
 	})
 
-	mondaytweaks.OptimizeVariablesExtraction = true
+	mondaytweaks.OptimizeVariablesExtraction.Store(true)
 
 	for _, n := range []int{25, 50, 100, 200} {
-		mondaytweaks.BatchExtractedVariablesJSON = false
+		mondaytweaks.BatchExtractedVariablesJSON.Store(false)
 		b.Run(fmt.Sprintf("sjson/N=%d", n), func(b *testing.B) { benchmarkExtraction(b, n) })
 
-		mondaytweaks.BatchExtractedVariablesJSON = true
+		mondaytweaks.BatchExtractedVariablesJSON.Store(true)
 		b.Run(fmt.Sprintf("batched/N=%d", n), func(b *testing.B) { benchmarkExtraction(b, n) })
 	}
 }

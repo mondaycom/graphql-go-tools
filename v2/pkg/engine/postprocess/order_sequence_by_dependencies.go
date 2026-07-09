@@ -16,7 +16,7 @@ func (o *orderSequenceByDependencies) ProcessFetchTree(root *resolve.FetchTreeNo
 	if o.disable {
 		return
 	}
-	if mondaytweaks.MemoizeFetchDependencyOrdering {
+	if mondaytweaks.MemoizeFetchDependencyOrdering.Load() {
 		o.processFetchTreeMemoized(root)
 		return
 	}

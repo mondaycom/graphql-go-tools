@@ -43,7 +43,7 @@ type arenaPool interface {
 // mondaytweaks.EnableSizedArenaPool tweak: the size-classed retention-bounded
 // pool, or the upstream arena.Pool when the tweak is compiled out.
 func newRequestArenaPool(options ResolverOptions) arenaPool {
-	if !mondaytweaks.EnableSizedArenaPool {
+	if !mondaytweaks.EnableSizedArenaPool.Load() {
 		return arena.NewArenaPool()
 	}
 	return newSizedArenaPool(options.ArenaPoolMaxRetainedArenaBytes)

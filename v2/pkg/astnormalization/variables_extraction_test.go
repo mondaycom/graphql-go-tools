@@ -559,9 +559,9 @@ func TestVariablesExtraction(t *testing.T) {
 	t.Run("file uploads", func(t *testing.T) {
 		// These assert upload-path discovery, which mondaytweaks.DisableUploadFinding turns off
 		// by default (the router never handles uploads). Re-enable it to test the upstream pass.
-		origDisableUploadFinding := mondaytweaks.DisableUploadFinding
-		t.Cleanup(func() { mondaytweaks.DisableUploadFinding = origDisableUploadFinding })
-		mondaytweaks.DisableUploadFinding = false
+		origDisableUploadFinding := mondaytweaks.DisableUploadFinding.Load()
+		t.Cleanup(func() { mondaytweaks.DisableUploadFinding.Store(origDisableUploadFinding) })
+		mondaytweaks.DisableUploadFinding.Store(false)
 
 		t.Run("arg has inline object value with upload passed via variable", func(t *testing.T) {
 			var visitor *variablesExtractionVisitor
@@ -671,8 +671,8 @@ func TestVariablesExtraction(t *testing.T) {
 // finding is enabled. This is what makes skipping FindUploads safe for router traffic, which
 // never carries uploads.
 func TestVariablesExtraction_DisableUploadFindingSkipsDiscovery(t *testing.T) {
-	orig := mondaytweaks.DisableUploadFinding
-	t.Cleanup(func() { mondaytweaks.DisableUploadFinding = orig })
+	orig := mondaytweaks.DisableUploadFinding.Load()
+	t.Cleanup(func() { mondaytweaks.DisableUploadFinding.Store(orig) })
 
 	const definition = `scalar Upload input Input {f: Upload!} type Mutation { hello(arg: Input!): String }`
 	const operation = `mutation Foo($i: Upload!) { hello(arg: {f: $i}) }`
@@ -691,11 +691,11 @@ func TestVariablesExtraction_DisableUploadFindingSkipsDiscovery(t *testing.T) {
 		return visitor
 	}
 
-	mondaytweaks.DisableUploadFinding = false
+	mondaytweaks.DisableUploadFinding.Store(false)
 	enabled := run()
 	assert.NotEmpty(t, enabled.uploadsPath, "upload path must be discovered when finding is enabled")
 
-	mondaytweaks.DisableUploadFinding = true
+	mondaytweaks.DisableUploadFinding.Store(true)
 	disabled := run()
 	assert.Empty(t, disabled.uploadsPath, "no upload path should be produced when finding is disabled")
 }

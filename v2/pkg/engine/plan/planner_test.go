@@ -910,10 +910,10 @@ func TestPlanner_MergeContiguousMutationRootFields(t *testing.T) {
 	}
 
 	t.Run("disabled keeps separate mutation root fetches", func(t *testing.T) {
-		previousFlagValue := mondaytweaks.MergeContiguousMutationRootFields
-		mondaytweaks.MergeContiguousMutationRootFields = false
+		previousFlagValue := mondaytweaks.MergeContiguousMutationRootFields.Load()
+		mondaytweaks.MergeContiguousMutationRootFields.Store(false)
 		t.Cleanup(func() {
-			mondaytweaks.MergeContiguousMutationRootFields = previousFlagValue
+			mondaytweaks.MergeContiguousMutationRootFields.Store(previousFlagValue)
 		})
 
 		plan := planOperation(t)
@@ -923,10 +923,10 @@ func TestPlanner_MergeContiguousMutationRootFields(t *testing.T) {
 	})
 
 	t.Run("enabled reuses one fetch for contiguous same-subgraph mutation roots", func(t *testing.T) {
-		previousFlagValue := mondaytweaks.MergeContiguousMutationRootFields
-		mondaytweaks.MergeContiguousMutationRootFields = true
+		previousFlagValue := mondaytweaks.MergeContiguousMutationRootFields.Load()
+		mondaytweaks.MergeContiguousMutationRootFields.Store(true)
 		t.Cleanup(func() {
-			mondaytweaks.MergeContiguousMutationRootFields = previousFlagValue
+			mondaytweaks.MergeContiguousMutationRootFields.Store(previousFlagValue)
 		})
 
 		plan := planOperation(t)
@@ -1007,10 +1007,10 @@ func TestPlanner_MergeContiguousMutationRootFieldsDoesNotCrossSubgraphs(t *testi
 		ChildNode("CreateUpdateResult", "id").
 		DS()
 
-	previousFlagValue := mondaytweaks.MergeContiguousMutationRootFields
-	mondaytweaks.MergeContiguousMutationRootFields = true
+	previousFlagValue := mondaytweaks.MergeContiguousMutationRootFields.Load()
+	mondaytweaks.MergeContiguousMutationRootFields.Store(true)
 	t.Cleanup(func() {
-		mondaytweaks.MergeContiguousMutationRootFields = previousFlagValue
+		mondaytweaks.MergeContiguousMutationRootFields.Store(previousFlagValue)
 	})
 
 	def := unsafeparser.ParseGraphqlDocumentString(definition)
