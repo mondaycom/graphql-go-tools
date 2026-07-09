@@ -129,7 +129,7 @@ func NewWSTransport(ctx context.Context, opts WSTransportOptions) *WSTransport {
 		go t.pingLoop()
 	}
 
-	if mondaytweaks.CloseWSConnectionsOnContextCancel {
+	if mondaytweaks.CloseWSConnectionsOnContextCancel.Load() {
 		context.AfterFunc(ctx, t.closeAllConns)
 	}
 

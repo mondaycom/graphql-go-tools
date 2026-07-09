@@ -80,7 +80,7 @@ func (v *variablesExtractionVisitor) EnterArgument(ref int) {
 	// dead work here and its result (uploadsPath) is always empty. See
 	// mondaytweaks.DisableUploadFinding.
 	var uploadsMapping []uploads.UploadPathMapping
-	if !mondaytweaks.DisableUploadFinding {
+	if !mondaytweaks.DisableUploadFinding.Load() {
 		var err error
 		uploadsMapping, err = v.uploadFinder.FindUploads(v.operation, v.definition, v.operation.Input.Variables, ref, inputValueDefinition)
 		if err != nil {
@@ -219,10 +219,10 @@ func (v *variablesExtractionVisitor) EnterDocument(operation, definition *ast.Do
 	// The optimized path preserves byte-identical output only for single-operation
 	// documents; multi-operation documents share generated names across operations
 	// through the shared Input.Variables buffer, so they keep the original path.
-	v.optimize = mondaytweaks.OptimizeVariablesExtraction && operation.NumOfOperationDefinitions() == 1
+	v.optimize = mondaytweaks.OptimizeVariablesExtraction.Load() && operation.NumOfOperationDefinitions() == 1
 	v.preExistingNamesBuilt = false
 	v.nameCursor = 0
-	v.batchVarsJSON = v.optimize && mondaytweaks.BatchExtractedVariablesJSON
+	v.batchVarsJSON = v.optimize && mondaytweaks.BatchExtractedVariablesJSON.Load()
 	v.pendingVarNames = v.pendingVarNames[:0]
 	v.pendingVarValues = v.pendingVarValues[:0]
 	if v.optimize {

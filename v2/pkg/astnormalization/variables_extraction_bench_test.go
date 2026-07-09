@@ -85,14 +85,14 @@ func BenchmarkVariablesExtraction_AliasedBatch(b *testing.B) {
 // the default (mondaytweaks.DisableUploadFinding on) against the upstream pass. Run with
 // -benchmem to see the astjson.ParseBytes allocations the flag removes.
 func BenchmarkVariablesExtraction_UploadFinding(b *testing.B) {
-	origDisableUploadFinding := mondaytweaks.DisableUploadFinding
-	b.Cleanup(func() { mondaytweaks.DisableUploadFinding = origDisableUploadFinding })
+	origDisableUploadFinding := mondaytweaks.DisableUploadFinding.Load()
+	b.Cleanup(func() { mondaytweaks.DisableUploadFinding.Store(origDisableUploadFinding) })
 
 	for _, n := range []int{25, 50, 100, 200} {
-		mondaytweaks.DisableUploadFinding = false
+		mondaytweaks.DisableUploadFinding.Store(false)
 		b.Run(fmt.Sprintf("finding/N=%d", n), func(b *testing.B) { benchmarkExtractionSchema(b, benchExtractionSchemaWithUpload, n) })
 
-		mondaytweaks.DisableUploadFinding = true
+		mondaytweaks.DisableUploadFinding.Store(true)
 		b.Run(fmt.Sprintf("skipped/N=%d", n), func(b *testing.B) { benchmarkExtractionSchema(b, benchExtractionSchemaWithUpload, n) })
 	}
 }
