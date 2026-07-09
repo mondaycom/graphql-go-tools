@@ -93,9 +93,9 @@ type Resolver struct {
 	// Resolving & response buffering are very different tasks;
 	// as such, it was best to have two arena pools in terms of memory usage.
 	// A single pool for both was much less efficient.
-	resolveArenaPool *arena.Pool
+	resolveArenaPool arenaPool
 	// responseBufferPool is the arena pool dedicated for response buffering before sending to the client
-	responseBufferPool *arena.Pool
+	responseBufferPool arenaPool
 
 	// subgraphRequestSingleFlight is used to de-duplicate subgraph requests
 	subgraphRequestSingleFlight *SubgraphRequestSingleFlight
@@ -219,6 +219,12 @@ type ResolverOptions struct {
 	// and will override any values set for those options
 	// using runtime.GOMAXPROCS(0) allows the deduplication to scale with the CPU resources available to the process
 	SetDeduplicationShardCountToGOMAXPROCS bool
+
+	// ArenaPoolMaxRetainedArenaBytes overrides the capacity above which a
+	// request arena is considered oversize and only sparsely recycled by the
+	// size-classed pool. 0 applies the default (4MB). Ignored when
+	// EnableSizedArenaPool (mondaytweaks) is false.
+	ArenaPoolMaxRetainedArenaBytes int
 }
 
 // New returns a new Resolver. ctx.Done() is used to cancel all active subscriptions and streams.
@@ -297,8 +303,8 @@ func New(ctx context.Context, options ResolverOptions) *Resolver {
 		allowedErrorFields:           allowedErrorFields,
 		heartbeatInterval:            options.SubscriptionHeartbeatInterval,
 		maxSubscriptionFetchTimeout:  options.MaxSubscriptionFetchTimeout,
-		resolveArenaPool:             arena.NewArenaPool(),
-		responseBufferPool:           arena.NewArenaPool(),
+		resolveArenaPool:             newRequestArenaPool(options),
+		responseBufferPool:           newRequestArenaPool(options),
 		subgraphRequestSingleFlight:  NewSingleFlight(options.SubgraphRequestDeduplicationShardCount),
 		inboundRequestSingleFlight:   NewRequestSingleFlight(options.InboundRequestDeduplicationShardCount),
 	}
@@ -465,7 +471,14 @@ func (r *Resolver) ArenaResolveGraphQLResponse(ctx *Context, response *GraphQLRe
 
 	// only when loading is done, acquire an arena for the response buffer
 	responseArena := r.responseBufferPool.Acquire(ctx.Request.ID)
-	buf := arena.NewArenaBuffer(responseArena.Arena)
+	// Pre-size the buffer to the operation's typical response size so
+	// rendering doesn't repeatedly grow (and, the arena being monotonic,
+	// abandon) intermediate regions.
+	responseSizeHint := 0
+	if sized, ok := r.responseBufferPool.(*sizedArenaPool); ok {
+		responseSizeHint = sized.expectedSize(ctx.Request.ID)
+	}
+	buf := newResponseBuffer(responseArena.Arena, responseSizeHint)
 
 	responseResolveStart := time.Now()
 	err = resolvable.Resolve(ctx.ctx, response.Data, response.Fetches, buf)

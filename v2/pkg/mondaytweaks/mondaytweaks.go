@@ -52,6 +52,16 @@ const (
 	// ApolloRouterCompatibilitySubrequestHTTPError makes the Loader attach the SUBREQUEST_HTTP_ERROR
 	// code to non-2XX responses with no GraphQL errors body. This is a compatibility mode for Apollo Router.
 	ApolloRouterCompatibilitySubrequestHTTPError = true
+
+	// EnableSizedArenaPool switches request arenas in the resolve package to the
+	// size-classed, retention-bounded pool (resolve.sizedArenaPool). The upstream
+	// arena.Pool hands out any pooled arena regardless of size and never shrinks,
+	// so under bimodal traffic every pooled arena converges to the largest
+	// response it ever served — steady-state retention is concurrency × largest
+	// response (~680MB in the retention benchmark; the sized pool holds
+	// ~90-120MB, -83%, with unchanged throughput). Flip to false to fall back to
+	// the upstream pool in case a workload regresses.
+	EnableSizedArenaPool = true
 )
 
 var (

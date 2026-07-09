@@ -93,8 +93,10 @@ func TestSubgraphRequestSingleFlight_LeaderFollowerSizeHint(t *testing.T) {
 	if next == item {
 		t.Fatalf("expected new item after finish")
 	}
-	if next.sizeHint != len("hello") {
-		t.Fatalf("expected size hint %d, got %d", len("hello"), next.sizeHint)
+	// The size hint is the rolling mean plus 25% headroom.
+	expectedHint := len("hello") + len("hello")/4
+	if next.sizeHint != expectedHint {
+		t.Fatalf("expected size hint %d, got %d", expectedHint, next.sizeHint)
 	}
 }
 
@@ -206,7 +208,8 @@ func TestSubgraphRequestSingleFlight_SizeHintRollingWindow(t *testing.T) {
 	if nextShared {
 		t.Fatalf("expected leader for new request")
 	}
-	expected := 150
+	// Rolling mean 150, plus 25% headroom.
+	expected := 150 + 150/4
 	if next.sizeHint != expected {
 		t.Fatalf("expected rolling average size hint %d, got %d", expected, next.sizeHint)
 	}
