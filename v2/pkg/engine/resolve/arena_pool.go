@@ -38,10 +38,10 @@ type arenaPool interface {
 }
 
 // newRequestArenaPool returns the arena pool implementation selected by the
-// resolver options: the size-classed retention-bounded pool by default, or the
-// upstream arena.Pool when DisableSizedArenaPool is set.
+// EnableSizedArenaPool monday tweak: the size-classed retention-bounded pool,
+// or the upstream arena.Pool when the tweak is compiled out.
 func newRequestArenaPool(options ResolverOptions) arenaPool {
-	if options.DisableSizedArenaPool {
+	if !EnableSizedArenaPool {
 		return arena.NewArenaPool()
 	}
 	return newSizedArenaPool(options.ArenaPoolMaxRetainedArenaBytes)

@@ -220,15 +220,10 @@ type ResolverOptions struct {
 	// using runtime.GOMAXPROCS(0) allows the deduplication to scale with the CPU resources available to the process
 	SetDeduplicationShardCountToGOMAXPROCS bool
 
-	// DisableSizedArenaPool falls back to the upstream arena.Pool for request
-	// arenas. The default size-classed pool bounds the memory retained across
-	// requests (see sizedArenaPool); this is a kill switch in case a workload
-	// regresses under it.
-	DisableSizedArenaPool bool
 	// ArenaPoolMaxRetainedArenaBytes overrides the capacity above which a
 	// request arena is considered oversize and only sparsely recycled by the
 	// size-classed pool. 0 applies the default (4MB). Ignored when
-	// DisableSizedArenaPool is set.
+	// EnableSizedArenaPool (mondaytweaks) is false.
 	ArenaPoolMaxRetainedArenaBytes int
 }
 
