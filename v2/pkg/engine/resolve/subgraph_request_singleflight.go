@@ -94,7 +94,14 @@ func (s *SubgraphRequestSingleFlight) GetOrCreateItem(fetchItem *FetchItem, inpu
 		size := sizeValue.(*fetchSize)
 		size.mu.Lock()
 		if size.count > 0 {
-			item.sizeHint = size.totalBytes / size.count
+			mean := size.totalBytes / size.count
+			// Hint 25% above the rolling mean: roughly half of responses
+			// exceed the mean, and each such response forces bytes.Buffer to
+			// double its backing array and copy (transient garbage of ~2× the
+			// response size). The added headroom makes most responses fit the
+			// initial allocation at the cost of 25% extra capacity on the
+			// (short-lived) fetch buffer.
+			item.sizeHint = mean + mean/4
 		}
 		size.mu.Unlock()
 	}
