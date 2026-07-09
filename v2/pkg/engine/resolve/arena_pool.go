@@ -6,6 +6,8 @@ import (
 	"weak"
 
 	arena "github.com/wundergraph/go-arena"
+
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 )
 
 // sizedArenaPool is a drop-in replacement for arena.Pool that bounds the
@@ -38,10 +40,10 @@ type arenaPool interface {
 }
 
 // newRequestArenaPool returns the arena pool implementation selected by the
-// EnableSizedArenaPool monday tweak: the size-classed retention-bounded pool,
-// or the upstream arena.Pool when the tweak is compiled out.
+// mondaytweaks.EnableSizedArenaPool tweak: the size-classed retention-bounded
+// pool, or the upstream arena.Pool when the tweak is compiled out.
 func newRequestArenaPool(options ResolverOptions) arenaPool {
-	if !EnableSizedArenaPool {
+	if !mondaytweaks.EnableSizedArenaPool {
 		return arena.NewArenaPool()
 	}
 	return newSizedArenaPool(options.ArenaPoolMaxRetainedArenaBytes)
