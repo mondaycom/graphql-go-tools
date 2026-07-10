@@ -3,6 +3,7 @@ package plan
 import (
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astvisitor"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/operationreport"
 )
 
@@ -55,10 +56,17 @@ func areRequiredFieldsProvided(input areRequiredFieldsProvidedInput) (bool, *ope
 		return false, report
 	}
 
-	walker := astvisitor.NewWalkerWithID(4, "RequiredFieldsProvidedVisitor")
+	var walker *astvisitor.Walker
+	if mondaytweaks.PoolPlanningWalkers.Load() {
+		walker = astvisitor.WalkerFromPoolWithID("RequiredFieldsProvidedVisitor")
+		defer walker.Release()
+	} else {
+		w := astvisitor.NewWalkerWithID(4, "RequiredFieldsProvidedVisitor")
+		walker = &w
+	}
 
 	visitor := &requiredFieldsProvidedVisitor{
-		walker:         &walker,
+		walker:         walker,
 		input:          input,
 		key:            key,
 		selectionStack: []providesSelection{input.providedSelection},

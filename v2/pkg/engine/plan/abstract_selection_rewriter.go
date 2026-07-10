@@ -9,6 +9,7 @@ import (
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astnormalization"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astvisitor"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/operationreport"
 )
 
@@ -725,10 +726,17 @@ func (v *AbstractFieldPathCollector) EnterField(ref int) {
 }
 
 func collectPath(operation *ast.Document, definition *ast.Document, fieldRef int, fieldToPath bool) (fieldRefPaths map[int]string, pathFieldRefs map[string][]int, err error) {
-	walker := astvisitor.NewWalkerWithID(4, "AbstractFieldPathCollector")
+	var walker *astvisitor.Walker
+	if mondaytweaks.PoolPlanningWalkers.Load() {
+		walker = astvisitor.WalkerFromPoolWithID("AbstractFieldPathCollector")
+		defer walker.Release()
+	} else {
+		w := astvisitor.NewWalkerWithID(4, "AbstractFieldPathCollector")
+		walker = &w
+	}
 
 	c := &AbstractFieldPathCollector{
-		Walker:         &walker,
+		Walker:         walker,
 		operation:      operation,
 		definition:     definition,
 		targetFieldRef: fieldRef,
@@ -738,7 +746,7 @@ func collectPath(operation *ast.Document, definition *ast.Document, fieldRef int
 	}
 
 	filter := &FieldLimitedVisitor{
-		Walker:         &walker,
+		Walker:         walker,
 		targetFieldRef: fieldRef,
 	}
 

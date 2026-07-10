@@ -10,6 +10,7 @@ import (
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astparser"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astvisitor"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/lexer/literal"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/operationreport"
 )
 
@@ -92,10 +93,17 @@ func addRequiredFields(config *addRequiredFieldsConfiguration) (out AddRequiredF
 		return out, report
 	}
 
-	walker := astvisitor.NewWalkerWithID(4, "RequiredFieldsVisitor")
+	var walker *astvisitor.Walker
+	if mondaytweaks.PoolPlanningWalkers.Load() {
+		walker = astvisitor.WalkerFromPoolWithID("RequiredFieldsVisitor")
+		defer walker.Release()
+	} else {
+		w := astvisitor.NewWalkerWithID(4, "RequiredFieldsVisitor")
+		walker = &w
+	}
 
 	visitor := &requiredFieldsVisitor{
-		Walker:            &walker,
+		Walker:            walker,
 		config:            config,
 		key:               parsedSelectionSet,
 		importer:          &astimport.Importer{},

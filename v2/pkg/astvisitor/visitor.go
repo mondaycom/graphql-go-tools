@@ -139,6 +139,17 @@ func WalkerFromPool() *Walker {
 	return walker.(*Walker)
 }
 
+// WalkerFromPoolWithID retrieves a Walker from the shared pool and sets its
+// walkerID for debug/telemetry labels. The walkerID field is used only in
+// (currently commented-out) pprof label blocks and has no effect on walk
+// correctness. Callers must call Release() when done so the walker is
+// returned to the pool with all state cleared.
+func WalkerFromPoolWithID(id string) *Walker {
+	w := WalkerFromPool()
+	w.walkerID = id
+	return w
+}
+
 func (w *Walker) Release() {
 	if w.arena != nil {
 		w.arena.Reset()
@@ -147,6 +158,9 @@ func (w *Walker) Release() {
 	w.Report = nil
 	w.document = nil
 	w.definition = nil
+	w.filter = nil
+	w.OnExternalError = nil
+	w.walkerID = ""
 	walkerPool.Put(w)
 }
 
