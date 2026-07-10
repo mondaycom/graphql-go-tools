@@ -125,6 +125,36 @@ var (
 	// (single-operation documents); when false the per-variable sjson write runs unchanged.
 	BatchExtractedVariablesJSON atomic.Bool
 
+	// CacheRenderFieldPath replaces pool.BytesBuffer in renderFieldPath() with a reusable
+	// per-Resolvable scratch []byte (r.fieldPathBuf), and uses the Go compiler's zero-alloc
+	// m[string(b)] map-lookup optimisation in recordFieldReached so that looking up an
+	// already-seen path costs zero allocations.
+	//
+	// renderFieldPath() is on the hot path of every cost-control-enabled resolution:
+	//   - recordObjectTypeStats  — called per object in the response tree
+	//   - walkArray cost block   — called per array field
+	//   - recordFieldReached     — called once per unique *Field (deduplicated by pointer)
+	//   - renderFieldValue       — called when a custom fieldRenderer is active
+	//   - two error paths        — addRejectFieldError and the non-nullable null handler
+	//
+	// The original implementation calls pool.BytesBuffer.Get() + defer Put() + buf.String()
+	// on every call, producing one heap-allocated string and two sync.Pool operations per
+	// invocation.  Under cost-control load this was observed at ~3.4 GB alloc / 90 s
+	// (~1% of total allocations).
+	//
+	// With this flag:
+	//   - The pool.BytesBuffer Get/Put round-trip is eliminated; r.fieldPathBuf is reset
+	//     and reused across calls, growing once to the longest path seen.
+	//   - In recordFieldReached the typeNameStats lookup uses string(r.fieldPathBuf) directly
+	//     inside the map-index expression; the Go compiler elides the heap allocation for that
+	//     read.  Only the INSERT branch (new distinct path) materialises a real string, so the
+	//     per-call alloc drops to zero for already-seen paths.
+	//   - recordObjectTypeStats and walkArray still need one alloc for the map write-back key,
+	//     but avoid the pool overhead.
+	//
+	// When false, renderFieldPath() and all call sites run exactly as before.
+	CacheRenderFieldPath atomic.Bool
+
 	// DisableUploadFinding skips the per-argument upload-discovery pass in the variable-
 	// extraction normalizer (uploads.FindUploads). Whenever the schema declares an Upload
 	// scalar — which the federated router schema does — that pass calls astjson.ParseBytes on
@@ -156,4 +186,5 @@ func init() {
 	OptimizeVariablesExtraction.Store(true)
 	BatchExtractedVariablesJSON.Store(true)
 	DisableUploadFinding.Store(true)
+	CacheRenderFieldPath.Store(true)
 }
