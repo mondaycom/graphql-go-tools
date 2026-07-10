@@ -143,6 +143,26 @@ var (
 	// When false the original per-argument pass runs unchanged; tests that exercise upload
 	// discovery flip it off to assert the upstream behavior.
 	DisableUploadFinding atomic.Bool
+
+	// PoolPlanningWalkers routes the four per-request planning Walker allocations
+	// (addRequiredFields, areRequiredFieldsProvided, collectPath, getKeyPaths) through the
+	// shared astvisitor.WalkerFromPoolWithID / Release pool instead of calling
+	// NewWalkerWithID on every invocation.
+	//
+	// Each NewWalkerWithID call allocates four slices (Ancestors, Path, TypeDefinitions,
+	// deferred) on every request, contributing ~6 GB/90s of allocation at production scale
+	// (~1.86% of total). The existing pool already exists in the astvisitor package for other
+	// callers; these four per-request sites simply did not use it yet.
+	//
+	// The pool path calls WalkerFromPoolWithID(id) which retrieves a *Walker (already
+	// allocated, slices capacity retained from prior use), sets walkerID for telemetry, walks,
+	// then calls Release() which zeroes all visitor callbacks, clears filter/Report/document/
+	// definition/OnExternalError/walkerID, resets the arena, and returns the walker to the
+	// pool. State leakage between requests is impossible: Walk() itself re-slices Ancestors,
+	// Path, TypeDefinitions, and resets Depth/stop before walking, and Release() clears
+	// everything else. When this flag is false each site calls NewWalkerWithID exactly as
+	// before (original behavior, byte-identical).
+	PoolPlanningWalkers atomic.Bool
 )
 
 func init() {
@@ -156,4 +176,5 @@ func init() {
 	OptimizeVariablesExtraction.Store(true)
 	BatchExtractedVariablesJSON.Store(true)
 	DisableUploadFinding.Store(true)
+	PoolPlanningWalkers.Store(true)
 }

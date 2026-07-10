@@ -5,6 +5,7 @@ import (
 
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astvisitor"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/operationreport"
 )
 
@@ -173,9 +174,17 @@ func (f *collectNodesDSVisitor) collectKeysForPath(typeName, parentPath string, 
 }
 
 func getKeyPaths(input *keyVisitorInput) (keyPaths []KeyInfoFieldPath, hasExternalFields bool) {
-	walker := astvisitor.NewWalkerWithID(48, "KeyInfoVisitor")
+	var walker *astvisitor.Walker
+	if mondaytweaks.PoolPlanningWalkers.Load() {
+		walker = astvisitor.WalkerFromPoolWithID("KeyInfoVisitor")
+		defer walker.Release()
+	} else {
+		w := astvisitor.NewWalkerWithID(48, "KeyInfoVisitor")
+		walker = &w
+	}
+
 	visitor := &keyInfoVisitor{
-		walker:         &walker,
+		walker:         walker,
 		input:          input,
 		selectionStack: []providesSelection{input.providedSelection},
 	}
