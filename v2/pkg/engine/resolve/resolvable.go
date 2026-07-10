@@ -19,6 +19,7 @@ import (
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/errorcodes"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/fastjsonext"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/internal/unsafebytes"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/pool"
 )
 
@@ -134,6 +135,12 @@ type Resolvable struct {
 	// marshalBuf is a reusable scratch buffer for marshaling scalar values before
 	// writing them out.
 	marshalBuf []byte
+
+	// fieldPathBuf is a reusable scratch buffer for building the field path string
+	// in-place (CacheRenderFieldPath optimization). It is reset at the start of each
+	// buildFieldPathBuf call, so callers must not hold a reference across calls.
+	// Only used when mondaytweaks.CacheRenderFieldPath is enabled.
+	fieldPathBuf []byte
 
 	// enclosingTypeNames is a stack of the schema type name (Object.TypeName) per
 	// object layer; enclosingTypeName() returns the current one for error messages.
@@ -1800,7 +1807,14 @@ func (r *Resolvable) walkArray(arr *Array, value *astjson.Value) bool {
 		// Record array stats for Cost Control. Size counts only non-null elements: the
 		// pre-walk nulls elements the client does not receive (denied or invalid), and
 		// those must not be charged.
-		fieldPath := r.renderFieldPath()
+		var fieldPath string
+		if mondaytweaks.CacheRenderFieldPath.Load() {
+			// Reuse per-Resolvable scratch buffer; one alloc for the key string.
+			r.buildFieldPathBuf()
+			fieldPath = string(r.fieldPathBuf)
+		} else {
+			fieldPath = r.renderFieldPath()
+		}
 		stats := r.typeNameStats[fieldPath]
 		for _, arrayValue := range values {
 			if arrayValue.Type() == astjson.TypeNull {
@@ -1867,7 +1881,16 @@ func (r *Resolvable) recordObjectTypeStats(obj *Object, typeName []byte) {
 	if len(obj.Path) == 0 {
 		return
 	}
-	fieldPath := r.renderFieldPath()
+	var fieldPath string
+	if mondaytweaks.CacheRenderFieldPath.Load() {
+		// Build path into the reusable per-Resolvable scratch buffer, avoiding
+		// pool.BytesBuffer Get/Put overhead. One alloc for the string key is
+		// still required for the map write-back.
+		r.buildFieldPathBuf()
+		fieldPath = string(r.fieldPathBuf)
+	} else {
+		fieldPath = r.renderFieldPath()
+	}
 	stats := r.typeNameStats[fieldPath]
 	stats.Size++
 	if stats.TypeNames == nil {
@@ -1898,10 +1921,23 @@ func (r *Resolvable) recordFieldReached(value *astjson.Value, field *Field) {
 	r.reachedFields[field] = struct{}{}
 	nodePath := field.Value.NodePath()
 	r.pushNodePathElement(nodePath)
-	fieldPath := r.renderFieldPath()
-	r.popNodePathElement(nodePath)
-	if _, ok := r.typeNameStats[fieldPath]; !ok {
-		r.typeNameStats[fieldPath] = TypeNameStats{}
+	if mondaytweaks.CacheRenderFieldPath.Load() {
+		// Build path into the reusable scratch buffer; use the Go compiler's
+		// zero-alloc m[string(b)] trick for the lookup — no heap string is
+		// allocated when the key already exists in the map.  Only the insert
+		// branch (new key) materialises a real string, so the allocation is
+		// once per DISTINCT path rather than once per call.
+		r.buildFieldPathBuf()
+		r.popNodePathElement(nodePath)
+		if _, ok := r.typeNameStats[string(r.fieldPathBuf)]; !ok {
+			r.typeNameStats[string(r.fieldPathBuf)] = TypeNameStats{}
+		}
+	} else {
+		fieldPath := r.renderFieldPath()
+		r.popNodePathElement(nodePath)
+		if _, ok := r.typeNameStats[fieldPath]; !ok {
+			r.typeNameStats[fieldPath] = TypeNameStats{}
+		}
 	}
 }
 
@@ -2252,7 +2288,36 @@ func (r *Resolvable) addNonNullableFieldError(fieldPath []string, parent *astjso
 	r.popNodePathElement(fieldPath)
 }
 
+// buildFieldPathBuf writes the current field path into r.fieldPathBuf, resetting the
+// slice first (but keeping the underlying allocation). The result is valid until the
+// next call to buildFieldPathBuf. Callers must not hold a reference across calls.
+// Only used when mondaytweaks.CacheRenderFieldPath is enabled.
+func (r *Resolvable) buildFieldPathBuf() {
+	r.fieldPathBuf = r.fieldPathBuf[:0]
+	switch r.operationType {
+	case ast.OperationTypeQuery:
+		r.fieldPathBuf = append(r.fieldPathBuf, "Query"...)
+	case ast.OperationTypeMutation:
+		r.fieldPathBuf = append(r.fieldPathBuf, "Mutation"...)
+	case ast.OperationTypeSubscription:
+		r.fieldPathBuf = append(r.fieldPathBuf, "Subscription"...)
+	default:
+		r.fieldPathBuf = append(r.fieldPathBuf, invalidPath...)
+		return
+	}
+	for i := range r.path {
+		if r.path[i].Name != "" {
+			r.fieldPathBuf = append(r.fieldPathBuf, '.')
+			r.fieldPathBuf = append(r.fieldPathBuf, r.path[i].Name...)
+		}
+	}
+}
+
 func (r *Resolvable) renderFieldPath() string {
+	if mondaytweaks.CacheRenderFieldPath.Load() {
+		r.buildFieldPathBuf()
+		return string(r.fieldPathBuf)
+	}
 	buf := pool.BytesBuffer.Get()
 	defer pool.BytesBuffer.Put(buf)
 	switch r.operationType {
