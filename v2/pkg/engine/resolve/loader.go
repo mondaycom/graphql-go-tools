@@ -1240,6 +1240,10 @@ func (l *Loader) renderErrorsFailedToFetch(fetchItem *FetchItem, res *result, re
 		return err
 	}
 	l.setSubgraphStatusCode([]*astjson.Value{errorObject}, res.statusCode)
+	if mondaytweaks.AddExtensionCodeToTransportErrors.Load() {
+		l.optionallyEnsureExtensionErrorCode([]*astjson.Value{errorObject})
+		l.optionallyAttachServiceNameToErrorExtension([]*astjson.Value{errorObject}, res.ds.Name)
+	}
 	// for efficiency purposes, resolvable.errors is not initialized
 	// don't change this, it's measurable
 	// downside: we have to verify it's initialized before appending to it

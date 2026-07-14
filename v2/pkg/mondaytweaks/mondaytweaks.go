@@ -143,6 +143,16 @@ var (
 	// When false the original per-argument pass runs unchanged; tests that exercise upload
 	// discovery flip it off to assert the upstream behavior.
 	DisableUploadFinding atomic.Bool
+
+	// AddExtensionCodeToTransportErrors ensures that transport-level subgraph fetch failures
+	// (e.g. EOF, connection refused, timeout) carry the same extensions.code as GraphQL-level
+	// errors. Without this flag, renderErrorsFailedToFetch only calls setSubgraphStatusCode
+	// and skips optionallyEnsureExtensionErrorCode / optionallyAttachServiceNameToErrorExtension,
+	// so the resulting error object has extensions.statusCode but no extensions.code or
+	// extensions.serviceName — even when those are configured via DefaultErrorExtensionCode
+	// and AttachServiceNameToErrorExtension. With this flag both calls are applied to the
+	// synthesized error object, making transport errors consistent with GraphQL errors.
+	AddExtensionCodeToTransportErrors atomic.Bool
 )
 
 func init() {
@@ -156,4 +166,5 @@ func init() {
 	OptimizeVariablesExtraction.Store(true)
 	BatchExtractedVariablesJSON.Store(true)
 	DisableUploadFinding.Store(true)
+	AddExtensionCodeToTransportErrors.Store(true)
 }
