@@ -30,6 +30,7 @@ import (
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/datasource/httpclient"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/plan"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/resolve"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/internal/quotes"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/internal/unsafebytes"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/lexer/literal"
@@ -68,7 +69,7 @@ type Planner[T Configuration] struct {
 	nodes                              []ast.Node
 	variables                          resolve.Variables
 	lastFieldEnclosingTypeName         string
-	fetchClient                        *http.Client
+	fetchSource                        *Source
 	subscriptionClient                 GraphQLSubscriptionClient
 	rootTypeName                       string // rootTypeName - holds name of top level type
 	rootFieldName                      string // rootFieldName - holds name of root type field
@@ -355,7 +356,7 @@ func (p *Planner[T]) ConfigureFetch() resolve.FetchConfiguration {
 
 	var dataSource resolve.DataSource
 
-	dataSource = &Source{httpClient: p.fetchClient}
+	dataSource = p.fetchSource
 
 	if p.config.grpc != nil {
 		var err error
@@ -1739,6 +1740,7 @@ func getRelaxedPrintKitPool() *sync.Pool {
 type Factory[T Configuration] struct {
 	executionContext   context.Context
 	httpClient         *http.Client
+	source             *Source
 	grpcClient         grpc.ClientConnInterface
 	grpcClientProvider func() grpc.ClientConnInterface
 	subscriptionClient GraphQLSubscriptionClient
@@ -1759,9 +1761,15 @@ func NewFactory(executionContext context.Context, httpClient *http.Client, subsc
 		return nil, fmt.Errorf("subscription client is required")
 	}
 
+	var source *Source
+	if mondaytweaks.ReuseGraphQLSource.Load() {
+		source = &Source{httpClient: httpClient}
+	}
+
 	return &Factory[Configuration]{
 		executionContext:   executionContext,
 		httpClient:         httpClient,
+		source:             source,
 		subscriptionClient: subscriptionClient,
 	}, nil
 }
@@ -1843,8 +1851,13 @@ func (f *Factory[T]) Planner(logger abstractlogger.Logger) plan.DataSourcePlanne
 		grpcClient = f.grpcClientProvider()
 	}
 
+	source := f.source
+	if source == nil {
+		source = &Source{httpClient: f.httpClient}
+	}
+
 	return &Planner[T]{
-		fetchClient:        f.httpClient,
+		fetchSource:        source,
 		grpcClient:         grpcClient,
 		subscriptionClient: f.subscriptionClient,
 		printKitPool:       f.getPrintKitPool(),

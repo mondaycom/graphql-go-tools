@@ -153,6 +153,13 @@ var (
 	// and AttachServiceNameToErrorExtension. With this flag both calls are applied to the
 	// synthesized error object, making transport errors consistent with GraphQL errors.
 	AddExtensionCodeToTransportErrors atomic.Bool
+
+	// ReuseGraphQLSource pre-allocates a single *Source wrapper in Factory[T] at
+	// construction time and reuses it across all per-plan Planner instances, instead of
+	// allocating &Source{httpClient} once per fetch in ConfigureFetch. Source is a thin
+	// wrapper around *http.Client — the same client is used by every planner from the same
+	// factory, so sharing is safe. Saves ~1 alloc per fetch per cached plan.
+	ReuseGraphQLSource atomic.Bool
 )
 
 func init() {
@@ -167,4 +174,5 @@ func init() {
 	BatchExtractedVariablesJSON.Store(true)
 	DisableUploadFinding.Store(true)
 	AddExtensionCodeToTransportErrors.Store(true)
+	ReuseGraphQLSource.Store(true)
 }
