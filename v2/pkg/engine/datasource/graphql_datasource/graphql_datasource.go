@@ -30,6 +30,7 @@ import (
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/datasource/httpclient"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/plan"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/resolve"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/internal/quotes"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/internal/unsafebytes"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/lexer/literal"
@@ -1746,26 +1747,10 @@ type Factory[T Configuration] struct {
 	printKitPool       *sync.Pool
 }
 
-// FactoryOption configures optional behavior on a Factory created via NewFactory.
-type FactoryOption func(*factoryOptions)
-
-type factoryOptions struct {
-	sourceCaching bool
-}
-
-// WithSourceCaching controls whether the Factory pre-allocates a single shared
-// Source wrapper that is reused across all fetches, instead of allocating a new
-// Source per fetch in ConfigureFetch. Enabled by default.
-func WithSourceCaching(enabled bool) FactoryOption {
-	return func(o *factoryOptions) {
-		o.sourceCaching = enabled
-	}
-}
-
 // NewFactory (HTTP) creates a new factory for the GraphQL datasource planner
 // Graphql Datasource could be stateful in case you are using subscriptions,
 // make sure you are using the same execution context for all datasources
-func NewFactory(executionContext context.Context, httpClient *http.Client, subscriptionClient GraphQLSubscriptionClient, opts ...FactoryOption) (*Factory[Configuration], error) {
+func NewFactory(executionContext context.Context, httpClient *http.Client, subscriptionClient GraphQLSubscriptionClient) (*Factory[Configuration], error) {
 	if executionContext == nil {
 		return nil, fmt.Errorf("execution context is required")
 	}
@@ -1776,13 +1761,8 @@ func NewFactory(executionContext context.Context, httpClient *http.Client, subsc
 		return nil, fmt.Errorf("subscription client is required")
 	}
 
-	options := factoryOptions{sourceCaching: true}
-	for _, opt := range opts {
-		opt(&options)
-	}
-
 	var source *Source
-	if options.sourceCaching {
+	if mondaytweaks.ReuseGraphQLSource.Load() {
 		source = &Source{httpClient: httpClient}
 	}
 
@@ -1809,7 +1789,6 @@ func NewFactoryGRPC(executionContext context.Context, grpcClient grpc.ClientConn
 	return &Factory[Configuration]{
 		executionContext: executionContext,
 		grpcClient:       grpcClient,
-		source:           &Source{httpClient: nil},
 	}, nil
 }
 
@@ -1830,7 +1809,6 @@ func NewFactoryGRPCClientProvider(executionContext context.Context, clientProvid
 	return &Factory[Configuration]{
 		executionContext:   executionContext,
 		grpcClientProvider: clientProvider,
-		source:             &Source{httpClient: nil},
 	}, nil
 }
 
