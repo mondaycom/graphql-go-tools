@@ -1746,10 +1746,26 @@ type Factory[T Configuration] struct {
 	printKitPool       *sync.Pool
 }
 
+// FactoryOption configures optional behavior on a Factory created via NewFactory.
+type FactoryOption func(*factoryOptions)
+
+type factoryOptions struct {
+	sourceCaching bool
+}
+
+// WithSourceCaching controls whether the Factory pre-allocates a single shared
+// Source wrapper that is reused across all fetches, instead of allocating a new
+// Source per fetch in ConfigureFetch. Enabled by default.
+func WithSourceCaching(enabled bool) FactoryOption {
+	return func(o *factoryOptions) {
+		o.sourceCaching = enabled
+	}
+}
+
 // NewFactory (HTTP) creates a new factory for the GraphQL datasource planner
 // Graphql Datasource could be stateful in case you are using subscriptions,
 // make sure you are using the same execution context for all datasources
-func NewFactory(executionContext context.Context, httpClient *http.Client, subscriptionClient GraphQLSubscriptionClient) (*Factory[Configuration], error) {
+func NewFactory(executionContext context.Context, httpClient *http.Client, subscriptionClient GraphQLSubscriptionClient, opts ...FactoryOption) (*Factory[Configuration], error) {
 	if executionContext == nil {
 		return nil, fmt.Errorf("execution context is required")
 	}
@@ -1760,10 +1776,20 @@ func NewFactory(executionContext context.Context, httpClient *http.Client, subsc
 		return nil, fmt.Errorf("subscription client is required")
 	}
 
+	options := factoryOptions{sourceCaching: true}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	var source *Source
+	if options.sourceCaching {
+		source = &Source{httpClient: httpClient}
+	}
+
 	return &Factory[Configuration]{
 		executionContext:   executionContext,
 		httpClient:         httpClient,
-		source:             &Source{httpClient: httpClient},
+		source:             source,
 		subscriptionClient: subscriptionClient,
 	}, nil
 }
