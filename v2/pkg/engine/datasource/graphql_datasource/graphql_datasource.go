@@ -68,7 +68,7 @@ type Planner[T Configuration] struct {
 	nodes                              []ast.Node
 	variables                          resolve.Variables
 	lastFieldEnclosingTypeName         string
-	fetchClient                        *http.Client
+	fetchSource                        *Source
 	subscriptionClient                 GraphQLSubscriptionClient
 	rootTypeName                       string // rootTypeName - holds name of top level type
 	rootFieldName                      string // rootFieldName - holds name of root type field
@@ -355,7 +355,7 @@ func (p *Planner[T]) ConfigureFetch() resolve.FetchConfiguration {
 
 	var dataSource resolve.DataSource
 
-	dataSource = &Source{httpClient: p.fetchClient}
+	dataSource = p.fetchSource
 
 	if p.config.grpc != nil {
 		var err error
@@ -1739,6 +1739,7 @@ func getRelaxedPrintKitPool() *sync.Pool {
 type Factory[T Configuration] struct {
 	executionContext   context.Context
 	httpClient         *http.Client
+	source             *Source
 	grpcClient         grpc.ClientConnInterface
 	grpcClientProvider func() grpc.ClientConnInterface
 	subscriptionClient GraphQLSubscriptionClient
@@ -1762,6 +1763,7 @@ func NewFactory(executionContext context.Context, httpClient *http.Client, subsc
 	return &Factory[Configuration]{
 		executionContext:   executionContext,
 		httpClient:         httpClient,
+		source:             &Source{httpClient: httpClient},
 		subscriptionClient: subscriptionClient,
 	}, nil
 }
@@ -1781,6 +1783,7 @@ func NewFactoryGRPC(executionContext context.Context, grpcClient grpc.ClientConn
 	return &Factory[Configuration]{
 		executionContext: executionContext,
 		grpcClient:       grpcClient,
+		source:           &Source{httpClient: nil},
 	}, nil
 }
 
@@ -1801,6 +1804,7 @@ func NewFactoryGRPCClientProvider(executionContext context.Context, clientProvid
 	return &Factory[Configuration]{
 		executionContext:   executionContext,
 		grpcClientProvider: clientProvider,
+		source:             &Source{httpClient: nil},
 	}, nil
 }
 
@@ -1843,8 +1847,13 @@ func (f *Factory[T]) Planner(logger abstractlogger.Logger) plan.DataSourcePlanne
 		grpcClient = f.grpcClientProvider()
 	}
 
+	source := f.source
+	if source == nil {
+		source = &Source{httpClient: f.httpClient}
+	}
+
 	return &Planner[T]{
-		fetchClient:        f.httpClient,
+		fetchSource:        source,
 		grpcClient:         grpcClient,
 		subscriptionClient: f.subscriptionClient,
 		printKitPool:       f.getPrintKitPool(),
