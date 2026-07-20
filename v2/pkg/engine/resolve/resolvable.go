@@ -911,6 +911,14 @@ func (r *Resolvable) printExtensions(ctx context.Context, fetchTree *FetchTreeNo
 		}
 	}
 
+	if len(r.ctx.InlineArguments) > 0 {
+		if writeComma {
+			r.printBytes(comma)
+		}
+		writeComma = true
+		r.printInlineArgumentsExtension()
+	}
+
 	if r.ctx.TracingOptions.Enable && r.ctx.TracingOptions.IncludeTraceOutputInResponseExtensions {
 		if writeComma {
 			r.printBytes(comma)
@@ -1021,6 +1029,36 @@ func getDefaultReservedExtensions() map[string]struct{} {
 	}
 }
 
+func (r *Resolvable) printInlineArgumentsExtension() {
+	r.printBytes(quote)
+	r.printBytes(literalInlineArguments)
+	r.printBytes(quote)
+	r.printBytes(colon)
+	r.printBytes(lBrace)
+
+	r.printBytes(quote)
+	r.printBytes(literalCount)
+	r.printBytes(quote)
+	r.printBytes(colon)
+	r.printBytes(strconv.AppendInt(nil, int64(len(r.ctx.InlineArguments)), 10))
+	r.printBytes(comma)
+
+	r.printBytes(quote)
+	r.printBytes(literalArguments)
+	r.printBytes(quote)
+	r.printBytes(colon)
+	r.printBytes(lBrack)
+	for i, name := range r.ctx.InlineArguments {
+		if i > 0 {
+			r.printBytes(comma)
+		}
+		r.printBytes(strconv.AppendQuote(nil, name))
+	}
+	r.printBytes(rBrack)
+
+	r.printBytes(rBrace)
+}
+
 func (r *Resolvable) hasExtensions() bool {
 	// Apply the filter first to avoid missing extensions or applying empty extensions.
 	if r.filterAllowedSubgraphExtensions(getDefaultReservedExtensions()) {
@@ -1036,6 +1074,9 @@ func (r *Resolvable) hasExtensions() bool {
 		return true
 	}
 	if r.ctx.ExecutionOptions.IncludeQueryPlanInResponse {
+		return true
+	}
+	if len(r.ctx.InlineArguments) > 0 {
 		return true
 	}
 	if !r.skipValueCompletion && r.valueCompletion != nil {
@@ -1273,6 +1314,22 @@ func (r *Resolvable) walkObject(obj *Object, parent *astjson.Value) (hasError bo
 	}
 
 	typeName := value.GetStringBytes("__typename")
+	if typeName == nil && obj.isAbstract() {
+		// an abstract value without a runtime type cannot be validated against
+		// the contract, so it must be rejected
+		if !r.render() {
+			if r.options.ApolloCompatibilityValueCompletionInExtensions {
+				r.addValueCompletion(fmt.Sprintf("Invalid __typename found for object at %s.", r.pathLastElementDescription(obj.TypeName)), errorcodes.InvalidGraphql)
+			} else {
+				r.addErrorWithCode(fmt.Sprintf("Subgraph '%s' returned an invalid value for __typename field.", obj.SourceName), errorcodes.InvalidGraphql)
+			}
+			if !obj.Nullable {
+				return r.err()
+			}
+			return false
+		}
+		return r.walkNull()
+	}
 	if typeName != nil && len(obj.PossibleTypes) > 0 {
 		// when we have a typename field present in a json object, we need to check if the type is valid
 
@@ -1281,6 +1338,9 @@ func (r *Resolvable) walkObject(obj *Object, parent *astjson.Value) (hasError bo
 				// during pre-walk we need to add an error when the typename do not match a possible type
 				if r.options.ApolloCompatibilityValueCompletionInExtensions {
 					r.addValueCompletion(fmt.Sprintf("Invalid __typename found for object at %s.", r.pathLastElementDescription(obj.TypeName)), errorcodes.InvalidGraphql)
+				} else if _, inaccessible := obj.InaccessibleTypes[string(typeName)]; inaccessible {
+					// the type is a member of the abstract type but @inaccessible so the error must not leak its name
+					r.addErrorWithCode(fmt.Sprintf("Subgraph '%s' returned an invalid value for __typename field.", obj.SourceName), errorcodes.InvalidGraphql)
 				} else {
 					r.addErrorWithCode(fmt.Sprintf("Subgraph '%s' returned invalid value '%s' for __typename field.", obj.SourceName, string(typeName)), errorcodes.InvalidGraphql)
 				}

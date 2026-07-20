@@ -1,5 +1,47 @@
 # Changelog
 
+## [2.13.2](https://github.com/wundergraph/graphql-go-tools/compare/v2.13.1...v2.13.2) (2026-07-17)
+
+
+### Bug Fixes
+
+* accept empty lists for non-null list items ([#1600](https://github.com/wundergraph/graphql-go-tools/issues/1600)) ([bd86537](https://github.com/wundergraph/graphql-go-tools/commit/bd8653780bdc702fdcd11a449a254509c62c2b5e))
+
+## [2.13.1](https://github.com/wundergraph/graphql-go-tools/compare/v2.13.0...v2.13.1) (2026-07-17)
+
+
+### Bug Fixes
+
+* improve ast rewriter field provenance ([#1587](https://github.com/wundergraph/graphql-go-tools/issues/1587)) ([ee8555b](https://github.com/wundergraph/graphql-go-tools/commit/ee8555b374e4682ab72f1b73f73cdafc142decab))
+
+## [2.13.0](https://github.com/wundergraph/graphql-go-tools/compare/v2.12.1...v2.13.0) (2026-07-17)
+
+
+### Features
+
+* improve abstract field validation ([#1588](https://github.com/wundergraph/graphql-go-tools/issues/1588)) ([d6cceac](https://github.com/wundergraph/graphql-go-tools/commit/d6cceacd291eee5dbab8f6a0cadd245e47eca2d0))
+
+## [2.12.1](https://github.com/wundergraph/graphql-go-tools/compare/v2.12.0...v2.12.1) (2026-07-15)
+
+
+### Bug Fixes
+
+* resolve buffer not been cleared ([#1590](https://github.com/wundergraph/graphql-go-tools/issues/1590)) ([9b86c3d](https://github.com/wundergraph/graphql-go-tools/commit/9b86c3df092d457ade573dda6ae115ebddf9f5bb))
+
+## [2.12.0](https://github.com/wundergraph/graphql-go-tools/compare/v2.11.0...v2.12.0) (2026-07-15)
+
+
+### Features
+
+* add new visitor for inline arguments validation ([#1577](https://github.com/wundergraph/graphql-go-tools/issues/1577)) ([fce54b2](https://github.com/wundergraph/graphql-go-tools/commit/fce54b27473aee1b7d03d7a86a14b083543632b7))
+
+## [2.11.0](https://github.com/wundergraph/graphql-go-tools/compare/v2.10.0...v2.11.0) (2026-07-13)
+
+
+### Features
+
+* **grpc_datasource:** add ConnectRPC transport implementation ([#1509](https://github.com/wundergraph/graphql-go-tools/issues/1509)) ([a2038d2](https://github.com/wundergraph/graphql-go-tools/commit/a2038d2b3585204468ab218d6d15b863c841e249))
+
 ## [2.10.0](https://github.com/wundergraph/graphql-go-tools/compare/v2.9.2...v2.10.0) (2026-07-09)
 
 
