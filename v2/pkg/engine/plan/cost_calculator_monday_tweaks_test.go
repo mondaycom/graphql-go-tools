@@ -13,6 +13,7 @@ import (
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astnormalization"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/asttransform"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/astvalidation"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/operationreport"
 
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
@@ -166,6 +167,8 @@ func findNode(root *CostTreeNode, coord FieldCoordinate) *CostTreeNode {
 // planners that only traverse through a field (HasPathWithFieldRef=false), so Query.teams
 // receives exactly one data source hash (staging's), not two.
 func TestCostVisitor_EntityResolutionPlannerDoesNotInflateParentFieldCost(t *testing.T) {
+	mondaytweaks.SkipEntityResolutionPlannerCostForParentField.Store(true)
+	defer mondaytweaks.SkipEntityResolutionPlannerCostForParentField.Store(false)
 	// Merged schema seen by the gateway.
 	const mergedSchema = `
 		type Query {

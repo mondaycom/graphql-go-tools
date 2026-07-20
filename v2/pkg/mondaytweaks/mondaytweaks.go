@@ -164,7 +164,7 @@ var (
 
 func init() {
 	CoerceNullVariablesWithDefaults.Store(true)
-	SkipEntityResolutionPlannerCostForParentField.Store(true)
+	SkipEntityResolutionPlannerCostForParentField.Store(false)
 	CloseWSConnectionsOnContextCancel.Store(true)
 	MemoizeFetchDependencyOrdering.Store(true)
 	ApolloRouterCompatibilitySubrequestHTTPError.Store(true)
