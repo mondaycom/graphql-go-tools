@@ -13,26 +13,26 @@ import (
 )
 
 // benchExtractionSchema models the monday.com bulk-mutation shape:
-// change_column_value takes 4 scalar args (2 repeat across the batch, 2 are unique
+// changeColumnValue takes 4 scalar args (2 repeat across the batch, 2 are unique
 // per aliased field) and returns an object with a selectable field.
 const benchExtractionSchema = `
 schema { query: Query mutation: Mutation }
 type Query { hello: String }
 type Item { id: ID }
 type Mutation {
-	change_column_value(board_id: ID, item_id: ID, column_id: String, value: String): Item
+	changeColumnValue(boardId: ID, itemId: ID, columnId: String, value: String): Item
 }
 `
 
-// buildAliasedBatchMutation reproduces the Google-Apps-Script bulk shape:
-// one anonymous mutation with N aliased change_column_value root fields, all args
-// inline. board_id + column_id repeat (dedup candidates); item_id + value are unique.
+// buildAliasedBatchMutation reproduces the monday.com bulk shape:
+// one named mutation with N aliased changeColumnValue root fields, all args
+// inline. boardId + columnId repeat (dedup candidates); itemId + value are unique.
 func buildAliasedBatchMutation(n int) string {
 	var b strings.Builder
-	b.WriteString("mutation {\n")
+	b.WriteString("mutation BulkChangeColumnValue {\n")
 	for i := 0; i < n; i++ {
 		fmt.Fprintf(&b,
-			"  u%d: change_column_value(board_id: 5397435412, item_id: %d, column_id: \"numbers_mkkbc1yz\", value: \"%d\") { id }\n",
+			"  u%d: changeColumnValue(boardId: 5397435412, itemId: %d, columnId: \"numbers_mkkbc1yz\", value: \"%d\") { id }\n",
 			i, 6000000000+i, i*100)
 	}
 	b.WriteString("}")
