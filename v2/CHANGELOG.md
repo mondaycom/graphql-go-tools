@@ -1,5 +1,74 @@
 # Changelog
 
+## [2.18.0](https://github.com/wundergraph/graphql-go-tools/compare/v2.17.0...v2.18.0) (2026-08-28)
+
+
+### Features
+
+* allow cached fetches to call loader hooks ([#1645](https://github.com/wundergraph/graphql-go-tools/issues/1645)) ([e890d88](https://github.com/wundergraph/graphql-go-tools/commit/e890d886e7d18ea7d99dc69861a8bd73acc8fc9e))
+* root query field caching ([#1643](https://github.com/wundergraph/graphql-go-tools/issues/1643)) ([54c993e](https://github.com/wundergraph/graphql-go-tools/commit/54c993e56ae7c88a14132ee636371e076efb6285))
+
+## [2.17.0](https://github.com/wundergraph/graphql-go-tools/compare/v2.16.0...v2.17.0) (2026-08-21)
+
+
+### Features
+
+* response caching base implementation ([#1638](https://github.com/wundergraph/graphql-go-tools/issues/1638)) ([2691879](https://github.com/wundergraph/graphql-go-tools/commit/26918796d41b36478f75d6d3c92a8c550d3ca3aa))
+
+## [2.16.0](https://github.com/wundergraph/graphql-go-tools/compare/v2.15.1...v2.16.0) (2026-08-13)
+
+
+### Features
+
+* implement multi fetch to the same subgraph ([#1594](https://github.com/wundergraph/graphql-go-tools/issues/1594)) ([22584e2](https://github.com/wundergraph/graphql-go-tools/commit/22584e2f691fffe29e8dd91d6e868826eeb55460))
+* schedule fetch trees optimally ([#1612](https://github.com/wundergraph/graphql-go-tools/issues/1612)) ([bd03deb](https://github.com/wundergraph/graphql-go-tools/commit/bd03deb2be134e7402fdd8c32b1d2ff3ae1376df))
+
+
+### Bug Fixes
+
+* check interface implementation in `potentiallySameObject` for nullability relaxation ([#1454](https://github.com/wundergraph/graphql-go-tools/issues/1454)) ([5bacb9e](https://github.com/wundergraph/graphql-go-tools/commit/5bacb9e75a5e23b1624519385440dd7ce45b8f0e))
+* improve handling of nullable lists for required fields ([#1631](https://github.com/wundergraph/graphql-go-tools/issues/1631)) ([0af4dd3](https://github.com/wundergraph/graphql-go-tools/commit/0af4dd310eba110873e48fa188238afeb4f2d942))
+
+## [2.15.1](https://github.com/wundergraph/graphql-go-tools/compare/v2.15.0...v2.15.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* query planning time regression ([#1627](https://github.com/wundergraph/graphql-go-tools/issues/1627)) ([b90db54](https://github.com/wundergraph/graphql-go-tools/commit/b90db54de72311c4a0c96cb9c2672bbd5079e71c))
+
+## [2.15.0](https://github.com/wundergraph/graphql-go-tools/compare/v2.14.2...v2.15.0) (2026-08-09)
+
+
+### Features
+
+* entitycache cache interface ([#1618](https://github.com/wundergraph/graphql-go-tools/issues/1618)) ([7ca8900](https://github.com/wundergraph/graphql-go-tools/commit/7ca89002d93cc7b446d62df2093ee50895267382))
+
+
+### Bug Fixes
+
+* add planner edge case fixes ([#1581](https://github.com/wundergraph/graphql-go-tools/issues/1581)) ([165b1f5](https://github.com/wundergraph/graphql-go-tools/commit/165b1f51dacc0e815b429e451329957fd91e552b))
+
+## [2.14.2](https://github.com/wundergraph/graphql-go-tools/compare/v2.14.1...v2.14.2) (2026-07-31)
+
+
+### Bug Fixes
+
+* incorrect type detection for abstract types ([#1613](https://github.com/wundergraph/graphql-go-tools/issues/1613)) ([e249e88](https://github.com/wundergraph/graphql-go-tools/commit/e249e882db4d5768b1661b99f92d070c55d987da))
+
+## [2.14.1](https://github.com/wundergraph/graphql-go-tools/compare/v2.14.0...v2.14.1) (2026-07-22)
+
+
+### Bug Fixes
+
+* incorrect alias behavior for required fields ([#1604](https://github.com/wundergraph/graphql-go-tools/issues/1604)) ([5752e91](https://github.com/wundergraph/graphql-go-tools/commit/5752e914cc6f88ce2fa9a3143712ede705c92226))
+
+## [2.14.0](https://github.com/wundergraph/graphql-go-tools/compare/v2.13.2...v2.14.0) (2026-07-21)
+
+
+### Features
+
+* add AllowStringLiteralsForEnums option to validator ([#1608](https://github.com/wundergraph/graphql-go-tools/issues/1608)) ([0771feb](https://github.com/wundergraph/graphql-go-tools/commit/0771febd0d27faf4878d32ef7a2d93d547989434))
+
 ## [2.13.2](https://github.com/wundergraph/graphql-go-tools/compare/v2.13.1...v2.13.2) (2026-07-17)
 
 

@@ -26,6 +26,7 @@ import (
 	"github.com/wundergraph/go-arena"
 
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/caching"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/datasource/httpclient"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/errorcodes"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/internal/unsafebytes"
@@ -111,9 +112,8 @@ type result struct {
 	//	[item1, item3], // merge response[1] into item1 and item3
 	//
 	// ]
-	batchStats       [][]*astjson.Value
-	fetchSkipped     bool
-	nestedMergeItems []*result
+	batchStats   [][]*astjson.Value
+	fetchSkipped bool
 
 	statusCode int
 	err        error
@@ -140,6 +140,11 @@ type result struct {
 	out               []byte
 	singleFlightStats *singleFlightStats
 	tools             *batchEntityTools
+
+	// multi is set on per-entry result views during MultiEntityFetch merging.
+	multi *multiEntryMergeConfig
+
+	parsed *astjson.Value
 }
 
 func (r *result) init(postProcessing PostProcessingConfiguration, info *FetchInfo) {
@@ -150,6 +155,60 @@ func (r *result) init(postProcessing PostProcessingConfiguration, info *FetchInf
 			Name: info.DataSourceName,
 		}
 	}
+}
+
+// parsedResponse returns the response body as an astjson value. Multi entries
+// reuse the response the parent parsed once; every other result parses its own
+// res.out. The status-code fallback for a parse error stays with the caller.
+func (r *result) parsedResponse(l *Loader) (*astjson.Value, error) {
+	if r.multi != nil && r.multi.response != nil {
+		return r.multi.response, nil
+	}
+	if r.parsed == nil {
+		parsed, err := astjson.ParseBytesWithArena(l.jsonArena, r.out)
+		if err != nil {
+			return nil, err
+		}
+		r.parsed = parsed
+	}
+	return r.parsed, nil
+}
+
+// responseErrors returns the subgraph errors to merge for this result: a multi
+// entry's pre-partitioned errors, otherwise the errors selected from the parsed
+// response by SelectResponseErrorsPath.
+func (r *result) responseErrors(response *astjson.Value) *astjson.Value {
+	if r.multi != nil {
+		return r.multi.errors
+	}
+	return response.Get(r.postProcessing.SelectResponseErrorsPath...)
+}
+
+// errorPathRoot is the leading path element the subgraph uses for this result:
+// a multi entry's alias, or "_entities" for an ordinary entity fetch. It feeds
+// getTaintedIndices and rewriteErrorPaths and decides alias hiding vs rewrite.
+func (r *result) errorPathRoot() string {
+	if r.multi != nil {
+		return r.multi.alias
+	}
+	return "_entities"
+}
+
+// taintInfo is the FetchInfo used to compute tainted indices: a multi entry's
+// own info, otherwise the fetch item's fetch info.
+func (r *result) taintInfo(fetchItem *FetchItem) *FetchInfo {
+	if r.multi != nil {
+		return r.multi.info
+	}
+	return fetchItem.Fetch.FetchInfo()
+}
+
+// emptyAliasIsBenign reports whether this is a single-origin multi entry whose
+// alias returned an empty _entities array: a benign no-op matching the unmerged
+// EntityFetch whose ["data","_entities","0"] selects null.
+func (r *result) emptyAliasIsBenign(responseData *astjson.Value) bool {
+	return r.multi != nil && r.multi.originSingle &&
+		responseData.Type() == astjson.TypeArray && len(responseData.GetArray()) == 0
 }
 
 func IsIntrospectionDataSource(dataSourceID string) bool {
@@ -348,6 +407,9 @@ func (l *Loader) preparePhase(item *FetchItem) (*preparedFetch, error) {
 		prepared.batchFetch = true
 		err := l.prepareBatchEntityFetch(item, fetch, items, res, prepared)
 		return prepared, err
+	case *MultiEntityFetch:
+		err := l.prepareMultiEntityFetch(item, fetch, res, prepared)
+		return prepared, err
 	default:
 		return nil, nil
 	}
@@ -357,10 +419,30 @@ func (l *Loader) loadPhase(ctx context.Context, prepared *preparedFetch) error {
 	if prepared.skipLoad {
 		return nil
 	}
+	if l.responseCacheLookup(prepared) {
+		// OnLoad is called before a fetch is executed.
+		// When we hit the response cache, we don't execute the fetch but we still want to call the hooks.
+		if l.ctx.LoaderHooks != nil {
+			// The loaderHookContext must be set to allow the logic to call OnFinished.
+			prepared.res.loaderHookContext = l.ctx.LoaderHooks.OnLoad(ctx, prepared.res.ds)
+		}
+
+		prepared.responseCacheHit = true
+		if prepared.trace != nil {
+			prepared.trace.LoadSkipped = true
+		}
+		return nil
+	}
+
 	l.executeSourceLoad(ctx, prepared.item, prepared.source, prepared.input, prepared.res, prepared.trace)
 	if prepared.res.err != nil {
 		l.recordErroredFetchID(prepared.item)
 	}
+
+	// The response is not read here: this phase runs unlocked and concurrently
+	// across parallel fetches, and parsing it would allocate on the arena
+	// without holding the data lock. The response cache collects its entities in
+	// the merge phase instead, off the parse the merge already pays for.
 	return nil
 }
 
@@ -368,20 +450,16 @@ func (l *Loader) mergePhase(prepared *preparedFetch) error {
 	l.dataBuffer.Lock()
 	defer l.dataBuffer.Unlock()
 
-	res := prepared.res
-	var err error
-	if res.nestedMergeItems != nil {
-		for j := range res.nestedMergeItems {
-			err = l.mergeResult(prepared.item, res.nestedMergeItems[j], prepared.items[j:j+1])
-			l.callOnFinished(res.nestedMergeItems[j])
-			if err != nil {
-				return errors.WithStack(err)
-			}
-		}
-		return nil
+	if prepared.multiEntries != nil {
+		return l.mergeMultiEntityResult(prepared)
 	}
-	err = l.mergeResult(prepared.item, res, prepared.items)
-	l.callOnFinished(res)
+
+	if err := l.responseCacheCollect(prepared); err != nil {
+		l.reportResponseCacheError(fmt.Errorf("response cache collect error: %w", err))
+	}
+
+	err := l.mergeResult(prepared.item, prepared.res, prepared.items)
+	l.callOnFinished(prepared.res)
 	return err
 }
 
@@ -404,7 +482,12 @@ func (l *Loader) resolveSingle(ctx context.Context, item *FetchItem) error {
 	if err := l.loadPhase(ctx, prepared); err != nil {
 		return errors.WithStack(err)
 	}
-	return l.mergePhase(prepared)
+	err = l.mergePhase(prepared)
+	// After mergePhase released the data lock: the cache round trip must not
+	// hold up the fetches waiting on it. Runs regardless of the merge outcome,
+	// matching the store that used to sit in the load phase.
+	l.responseCacheFlush(prepared)
+	return err
 }
 
 type preparedFetch struct {
@@ -416,6 +499,16 @@ type preparedFetch struct {
 	trace      *DataSourceLoadTrace
 	skipLoad   bool
 	batchFetch bool
+
+	responseCacheKeys []string
+
+	isRootFetchCache bool
+
+	responseCacheHit bool
+
+	responseCacheItems []caching.Item
+
+	multiEntries []preparedMultiEntry
 }
 
 func (l *Loader) shouldSkipErroredDependencyLocked(item *FetchItem) bool {
@@ -591,7 +684,7 @@ func (e ErrMergeResult) Error() string {
 		}
 		return fmt.Sprintf("unable to merge results from subgraph '%s' at path '%s': differing types", e.Subgraph, e.Path)
 	}
-	return fmt.Sprintf("unable to merge results from subgraph %s", e.Subgraph)
+	return "unable to merge results from subgraph " + e.Subgraph
 }
 
 func (l *Loader) setSkipErrors(res *result, items []*astjson.Value) {
@@ -632,7 +725,8 @@ func (l *Loader) mergeResult(fetchItem *FetchItem, res *result, items []*astjson
 	}
 	// astjson.ParseBytesWithArena copies bytes onto the arena internally,
 	// tying the byte lifecycle to the arena and preventing GC-related segfaults.
-	response, err := astjson.ParseBytesWithArena(l.jsonArena, res.out)
+	// Multi entries share a response parsed once by the parent.
+	response, err := res.parsedResponse(l)
 	if err != nil {
 		// Fall back to status code if parsing fails and non-2XX
 		if (res.statusCode > 0 && res.statusCode < 200) || res.statusCode >= 300 {
@@ -641,7 +735,9 @@ func (l *Loader) mergeResult(fetchItem *FetchItem, res *result, items []*astjson
 		return l.renderErrorsFailedToFetch(fetchItem, res, invalidGraphQLResponse)
 	}
 
-	if l.allowCustomExtensionProperties {
+	// Multi entries skip this: their parent multi fetch collects the extensions
+	// once from the shared response.
+	if l.allowCustomExtensionProperties && res.multi == nil {
 		extensions := response.Get("extensions")
 
 		if astjson.ValueIsNonNull(extensions) && extensions.Type() == astjson.TypeObject {
@@ -661,14 +757,14 @@ func (l *Loader) mergeResult(fetchItem *FetchItem, res *result, items []*astjson
 	var taintedIndices []int
 	// Check if the subgraph response has errors.
 	if res.postProcessing.SelectResponseErrorsPath != nil {
-		responseErrors := response.Get(res.postProcessing.SelectResponseErrorsPath...)
+		responseErrors := res.responseErrors(response)
 		if astjson.ValueIsNonNull(responseErrors) {
 			hasErrors = len(responseErrors.GetArray()) > 0
 			// If the response has the "errors" key, and its value is empty,
 			// we don't consider it as an error. Note: it is not compliant with graphql spec.
 			if hasErrors {
 				if l.validateRequiredExternalFields && res.postProcessing.SelectResponseDataPath != nil {
-					taintedIndices = getTaintedIndices(fetchItem.Fetch, responseData, responseErrors)
+					taintedIndices = getTaintedIndices(res.taintInfo(fetchItem), res.errorPathRoot(), responseData, responseErrors)
 				}
 				if len(taintedIndices) > 0 {
 					// Override errors with generic error about missing deps.
@@ -690,7 +786,9 @@ func (l *Loader) mergeResult(fetchItem *FetchItem, res *result, items []*astjson
 	if res.postProcessing.SelectResponseDataPath != nil && astjson.ValueIsNull(responseData) {
 		// First check if this is actually an entity null fetch, instead of a data null fetch.
 		// In this case we return early to avoid adding subgraph errors or merging this into items.
-		if isEmptyEntityFetch(fetchItem, response) {
+		// Multi-entity entry items carry no Fetch (nil) and have no trailing index in their
+		// data path, so the check does not apply to them.
+		if res.multi == nil && isEmptyEntityFetch(fetchItem, response) {
 			return nil
 		}
 
@@ -739,6 +837,11 @@ func (l *Loader) mergeResult(fetchItem *FetchItem, res *result, items []*astjson
 		if slices.Contains(taintedIndices, 0) {
 			l.taintedObjs.add(items[0])
 		}
+		return nil
+	}
+	// A single-origin multi entry over an empty _entities array is a benign no-op,
+	// matching the unmerged EntityFetch whose ["data","_entities","0"] selects null.
+	if res.emptyAliasIsBenign(responseData) {
 		return nil
 	}
 	batch := responseData.GetArray()
@@ -856,8 +959,15 @@ func (l *Loader) appendSubgraphError(res *result, fetchItem *FetchItem, value *a
 func (l *Loader) mergeErrors(res *result, fetchItem *FetchItem, value *astjson.Value) error {
 	values := value.GetArray()
 	l.optionallyOmitErrorLocations(values)
+	// Multi entries prefix error paths with their internal alias. When rewriting
+	// is enabled, rewrite the root (the entry's alias, or "_entities" for an
+	// ordinary entity fetch) to the fetch's response path. When it is disabled, a
+	// multi entry still hides its alias as "_entities" so pass-through propagation
+	// never leaks the internal alias.
 	if l.rewriteSubgraphErrorPaths {
-		rewriteErrorPaths(l.jsonArena, fetchItem, values)
+		rewriteErrorPaths(l.jsonArena, fetchItem, values, res.errorPathRoot())
+	} else if res.multi != nil {
+		hideAliasInErrorPaths(l.jsonArena, res.multi.alias, values)
 	}
 	l.optionallyEnsureExtensionErrorCode(values)
 
@@ -1085,12 +1195,14 @@ func (l *Loader) optionallyOmitErrorLocations(values []*astjson.Value) {
 	}
 }
 
-// rewriteErrorPaths rewrites GraphQL error "path" arrays for subgraph errors routed via _entities:
+// rewriteErrorPaths rewrites GraphQL error "path" arrays for subgraph errors
+// routed via the root field named rootName ("_entities", or a MultiEntityFetch
+// alias):
 //   - Prefixes with fetchItem.ResponsePathElements (trailing "@" removed).
-//   - Drops the numeric index immediately following "_entities".
+//   - Drops the numeric index immediately following rootName.
 //   - Converts all subsequent numeric segments to strings (e.g., 1 -> "1").
 //   - Skips non-string/non-number segments.
-func rewriteErrorPaths(a arena.Arena, fetchItem *FetchItem, values []*astjson.Value) {
+func rewriteErrorPaths(a arena.Arena, fetchItem *FetchItem, values []*astjson.Value, rootName string) {
 	pathPrefix := make([]string, len(fetchItem.ResponsePathElements))
 	copy(pathPrefix, fetchItem.ResponsePathElements)
 	// remove the trailing @ in case we're in an array as it looks weird in the path
@@ -1112,7 +1224,7 @@ func rewriteErrorPaths(a arena.Arena, fetchItem *FetchItem, values []*astjson.Va
 		}
 		for i, item := range pathItems {
 			if item.Type() != astjson.TypeString ||
-				unsafebytes.BytesToString(item.GetStringBytes()) != "_entities" {
+				unsafebytes.BytesToString(item.GetStringBytes()) != rootName {
 				continue
 			}
 			arr := astjson.ArrayValue(a)
@@ -1132,6 +1244,32 @@ func rewriteErrorPaths(a arena.Arena, fetchItem *FetchItem, values []*astjson.Va
 			value.Set(a, "path", arr)
 			break
 		}
+	}
+}
+
+// hideAliasInErrorPaths replaces a leading path element equal to alias with
+// "_entities", so pass-through error propagation never exposes the internal
+// MultiEntityFetch alias.
+func hideAliasInErrorPaths(a arena.Arena, alias string, values []*astjson.Value) {
+	for _, value := range values {
+		errorPath := value.Get("path")
+		if astjson.ValueIsNull(errorPath) || errorPath.Type() != astjson.TypeArray {
+			continue
+		}
+		pathItems := errorPath.GetArray()
+		if len(pathItems) == 0 {
+			continue
+		}
+		if pathItems[0].Type() != astjson.TypeString ||
+			unsafebytes.BytesToString(pathItems[0].GetStringBytes()) != alias {
+			continue
+		}
+		arr := astjson.ArrayValue(a)
+		astjson.AppendToArray(a, arr, astjson.StringValue(a, "_entities"))
+		for j := 1; j < len(pathItems); j++ {
+			astjson.AppendToArray(a, arr, pathItems[j])
+		}
+		value.Set(a, "path", arr)
 	}
 }
 
@@ -1253,9 +1391,9 @@ func (l *Loader) renderErrorsFailedToFetch(fetchItem *FetchItem, res *result, re
 }
 
 func (l *Loader) renderErrorsStatusFallback(fetchItem *FetchItem, res *result, statusCode int) error {
-	reason := fmt.Sprintf("%d", statusCode)
+	reason := strconv.Itoa(statusCode)
 	if statusText := http.StatusText(statusCode); statusText != "" {
-		reason += fmt.Sprintf(": %s", statusText)
+		reason += ": " + statusText
 	}
 
 	l.recordSubgraphError(res, res.err, NewSubgraphError(res.ds, fetchItem.ResponsePath, reason, res.statusCode))
@@ -1531,7 +1669,7 @@ func (l *Loader) prepareSingleFetch(fetchItem *FetchItem, fetch *SingleFetch, it
 	if err != nil {
 		res.out = l.renderErrorsInvalidInput(fetchItem)
 		prepared.skipLoad = true
-		return nil
+		return nil //nolint:nilerr // The render error is represented in the GraphQL response.
 	}
 	fetchInput := buf.Bytes()
 	allowed, err := l.validatePreFetch(fetchInput, fetch.Info, res)
@@ -1542,6 +1680,14 @@ func (l *Loader) prepareSingleFetch(fetchItem *FetchItem, fetch *SingleFetch, it
 		prepared.skipLoad = true
 		return nil
 	}
+	if l.responseCacheEnabled() && rootFetchCacheable(fetchItem, fetch) {
+		prepared.responseCacheKeys = []string{caching.Key(
+			xxhash.Sum64(fetchInput),
+			xxhash.Sum64String(fetch.Info.DataSourceID),
+		)}
+		prepared.isRootFetchCache = true
+	}
+
 	prepared.source = fetch.DataSource
 	prepared.input = fetchInput
 	prepared.trace = fetch.Trace
@@ -1567,6 +1713,7 @@ func (l *Loader) prepareEntityFetch(fetchItem *FetchItem, fetch *EntityFetch, it
 	if err != nil {
 		return errors.WithStack(err)
 	}
+	responseCacheHeaderEnd := preparedInput.Len()
 
 	err = fetch.Input.Item.Render(l.ctx, input, item)
 	if err != nil {
@@ -1602,10 +1749,26 @@ func (l *Loader) prepareEntityFetch(fetchItem *FetchItem, fetch *EntityFetch, it
 			return nil
 		}
 	}
+
 	_, _ = item.WriteTo(preparedInput)
+
+	responseCacheFooterStart := preparedInput.Len()
+
 	err = fetch.Input.Footer.RenderAndCollectUndefinedVariables(l.ctx, nil, preparedInput, &undefinedVariables)
 	if err != nil {
 		return errors.WithStack(err)
+	}
+
+	// Built before SetInputUndefinedVariables rewrites the buffer in place, so
+	// the offsets above still point at what they were taken from.
+	if l.responseCacheEnabled() {
+		rendered := preparedInput.Bytes()
+		selectionHash := responseCacheSelectionHash(
+			rendered[:responseCacheHeaderEnd],
+			rendered[responseCacheFooterStart:],
+		)
+		responseCacheItemHash := xxhash.Sum64(renderedItem)
+		prepared.responseCacheKeys = []string{caching.Key(responseCacheItemHash, selectionHash)}
 	}
 
 	err = SetInputUndefinedVariables(preparedInput, undefinedVariables)
@@ -1646,6 +1809,13 @@ func (b *batchEntityTools) reset() {
 	for i := range b.batchHashToIndex {
 		delete(b.batchHashToIndex, i)
 	}
+}
+
+// clearDedupState resets the per-entry dedup scope without touching the
+// arena, whose buffers must survive until final input assembly.
+func (b *batchEntityTools) clearDedupState() {
+	b.keyGen.Reset()
+	clear(b.batchHashToIndex)
 }
 
 type _batchEntityToolPool struct {
@@ -1697,10 +1867,8 @@ func (l *Loader) prepareBatchEntityFetch(fetchItem *FetchItem, fetch *BatchEntit
 		// we need to clear the batchStats slice to avoid memory corruption
 		// once the outer func returns, we must not keep pointers to items on the arena
 		for i := range batchStats {
-			// nolint:ineffassign
 			batchStats[i] = nil
 		}
-		// nolint:ineffassign
 		batchStats = nil
 	}()
 
@@ -1711,6 +1879,9 @@ func (l *Loader) prepareBatchEntityFetch(fetchItem *FetchItem, fetch *BatchEntit
 	if err != nil {
 		return errors.WithStack(err)
 	}
+	responseCacheHeaderEnd := preparedInput.Len()
+	var responseCacheItemHashes []uint64
+
 	batchItemIndex := 0
 	addSeparator := false
 
@@ -1721,7 +1892,6 @@ WithNextItem:
 			err = fetch.Input.Items[j].Render(l.ctx, item, itemInput)
 			if err != nil {
 				if fetch.Input.SkipErrItems {
-					err = nil // nolint:ineffassign
 					continue
 				}
 				if l.ctx.TracingOptions.Enable {
@@ -1752,6 +1922,9 @@ WithNextItem:
 				_, _ = itemInput.WriteTo(preparedInput)
 				// new unique representation
 				res.tools.batchHashToIndex[itemHash] = batchItemIndex
+				if l.responseCacheEnabled() {
+					responseCacheItemHashes = append(responseCacheItemHashes, itemHash)
+				}
 				// A new targets bucket for the unique index must be allocated on the arena:
 				// a heap-allocated bucket would only be referenced from arena memory,
 				// so the GC could collect its backing array while it is still in use.
@@ -1775,9 +1948,23 @@ WithNextItem:
 		}
 	}
 
+	responseCacheFooterStart := preparedInput.Len()
+
 	err = fetch.Input.Footer.RenderAndCollectUndefinedVariables(l.ctx, nil, preparedInput, &undefinedVariables)
 	if err != nil {
 		return errors.WithStack(err)
+	}
+
+	if l.responseCacheEnabled() && len(responseCacheItemHashes) > 0 {
+		rendered := preparedInput.Bytes()
+		selectionHash := responseCacheSelectionHash(
+			rendered[:responseCacheHeaderEnd],
+			rendered[responseCacheFooterStart:],
+		)
+		prepared.responseCacheKeys = make([]string, len(responseCacheItemHashes))
+		for i, itemHash := range responseCacheItemHashes {
+			prepared.responseCacheKeys[i] = caching.Key(itemHash, selectionHash)
+		}
 	}
 
 	err = SetInputUndefinedVariables(preparedInput, undefinedVariables)
