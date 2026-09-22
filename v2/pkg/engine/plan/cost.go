@@ -34,6 +34,7 @@ import (
 
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/ast"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/resolve"
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/mondaytweaks"
 	"github.com/wundergraph/graphql-go-tools/v2/pkg/operationreport"
 )
 
@@ -97,7 +98,17 @@ type FieldListSize struct {
 // multiplier returns the multiplier based on arguments and variables.
 // It picks the maximum value among slicing arguments, otherwise it tries to use AssumedSize.
 // If neither is available, it falls back to defaultListSize.
+//
+// With mondaytweaks.ResolveArraySlicingArguments enabled, a non-empty list slicing argument
+// wins over Int slicing arguments: the requested elements (e.g. unique ids) are an exact upper
+// bound on the returned list size. The largest list value wins among several lists.
 func (ls *FieldListSize) multiplier(args map[string]ArgumentInfo, vars resolve.VariablesView, defaultListSize int) int {
+	if mondaytweaks.ResolveArraySlicingArguments.Load() {
+		if listMultiplier := ls.listMultiplierMondayTweak(args, vars); listMultiplier != undefinedMultiplier {
+			return listMultiplier
+		}
+	}
+
 	multiplier := undefinedMultiplier
 	for _, slicingArg := range ls.SlicingArguments {
 		value, found := ls.resolveSlicingArg(slicingArg, args, vars)
@@ -148,6 +159,64 @@ func (ls *FieldListSize) resolveSlicingArg(slicingArg string, args map[string]Ar
 		return value.GetInt(), true
 	}
 	return 0, false
+}
+
+// listMultiplierMondayTweak returns the largest non-empty list slicing argument size, or
+// undefinedMultiplier when no such argument is provided. A requested list (e.g. unique ids) is an
+// exact upper bound on the returned list size, so it wins over any Int slicing argument.
+// Only called when mondaytweaks.ResolveArraySlicingArguments is enabled; returning
+// undefinedMultiplier leaves the untouched upstream resolution in multiplier in charge.
+func (ls *FieldListSize) listMultiplierMondayTweak(args map[string]ArgumentInfo, vars resolve.VariablesView) int {
+	listMultiplier := undefinedMultiplier
+	for _, slicingArg := range ls.SlicingArguments {
+		value, found, fromList := ls.resolveSlicingArgMondayTweak(slicingArg, args, vars)
+		if found && fromList && value > 0 && value > listMultiplier {
+			listMultiplier = value
+		}
+	}
+	return listMultiplier
+}
+
+// resolveSlicingArgMondayTweak is the mondaytweaks.ResolveArraySlicingArguments copy of
+// resolveSlicingArg. It behaves identically except that a list value resolves to its element
+// count instead of counting as not provided. The third return value reports that the size comes
+// from the length of a list value, which multiplier uses to let lists win over Int arguments.
+// Only called when the flag is enabled; resolveSlicingArg stays the untouched upstream path.
+func (ls *FieldListSize) resolveSlicingArgMondayTweak(slicingArg string, args map[string]ArgumentInfo, vars resolve.VariablesView) (int, bool, bool) {
+	defaultValue, hasDefault := ls.SlicingArgumentDefaults[slicingArg]
+	if strings.Contains(slicingArg, ".") {
+		value := extractSlicingArgValue(slicingArg, args, vars)
+		if value == nil {
+			return defaultValue, hasDefault, false
+		}
+		// TypeNull value should not lead to the defaults being used.
+		return slicingArgSizeMondayTweak(value)
+	}
+	arg, found := args[slicingArg]
+	if !found {
+		return defaultValue, hasDefault, false
+	}
+	if !arg.hasVariable {
+		return 0, false, false
+	}
+	value := vars.Get(arg.varName)
+	if value == nil {
+		return defaultValue, hasDefault, false
+	}
+	return slicingArgSizeMondayTweak(value)
+}
+
+// slicingArgSizeMondayTweak converts a resolved slicing argument value into a list size.
+// Ints are used as-is, lists resolve to their element count, and any other value type
+// (including an explicit null) counts as not provided.
+func slicingArgSizeMondayTweak(value *astjson.Value) (size int, found bool, fromList bool) {
+	switch value.Type() {
+	case astjson.TypeNumber:
+		return value.GetInt(), true, false
+	case astjson.TypeArray:
+		return len(value.GetArray()), true, true
+	}
+	return 0, false, false
 }
 
 // extractSlicingArgValue extracts a value from variables using slicingArg that contains
@@ -995,8 +1064,14 @@ func (node *CostTreeNode) validateSliceArguments(configs map[DSHash]*DataSourceC
 		count := 0
 		// The engine has all inlined literals converted to variables at this stage.
 		// No need to check for literals.
+		resolveLists := mondaytweaks.ResolveArraySlicingArguments.Load()
 		for _, slicingArg := range listSize.SlicingArguments {
-			if _, found := listSize.resolveSlicingArg(slicingArg, node.arguments, vars); found {
+			if resolveLists {
+				// A provided list argument counts as provided, empty list included.
+				if _, found, _ := listSize.resolveSlicingArgMondayTweak(slicingArg, node.arguments, vars); found {
+					count++
+				}
+			} else if _, found := listSize.resolveSlicingArg(slicingArg, node.arguments, vars); found {
 				count++
 			}
 		}
