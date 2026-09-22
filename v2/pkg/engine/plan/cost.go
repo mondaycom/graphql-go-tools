@@ -103,34 +103,18 @@ type FieldListSize struct {
 // wins over Int slicing arguments: the requested elements (e.g. unique ids) are an exact upper
 // bound on the returned list size. The largest list value wins among several lists.
 func (ls *FieldListSize) multiplier(args map[string]ArgumentInfo, vars resolve.VariablesView, defaultListSize int) int {
-	resolveLists := mondaytweaks.ResolveArraySlicingArguments.Load()
-
-	multiplier := undefinedMultiplier
-	listMultiplier := undefinedMultiplier
-	for _, slicingArg := range ls.SlicingArguments {
-		if resolveLists {
-			value, found, fromList := ls.resolveSlicingArgMondayTweak(slicingArg, args, vars)
-			if !found || value <= 0 {
-				continue
-			}
-			if fromList {
-				if value > listMultiplier {
-					listMultiplier = value
-				}
-			} else if value > multiplier {
-				multiplier = value
-			}
-		} else {
-			value, found := ls.resolveSlicingArg(slicingArg, args, vars)
-			if found && value > 0 && value > multiplier {
-				multiplier = value
-			}
+	if mondaytweaks.ResolveArraySlicingArguments.Load() {
+		if listMultiplier := ls.listMultiplierMondayTweak(args, vars); listMultiplier != undefinedMultiplier {
+			return listMultiplier
 		}
 	}
 
-	// A non-empty list is an exact upper bound, so it overrides any Int slicing argument.
-	if listMultiplier != undefinedMultiplier {
-		return listMultiplier
+	multiplier := undefinedMultiplier
+	for _, slicingArg := range ls.SlicingArguments {
+		value, found := ls.resolveSlicingArg(slicingArg, args, vars)
+		if found && value > 0 && value > multiplier {
+			multiplier = value
+		}
 	}
 
 	if multiplier == undefinedMultiplier {
@@ -175,6 +159,22 @@ func (ls *FieldListSize) resolveSlicingArg(slicingArg string, args map[string]Ar
 		return value.GetInt(), true
 	}
 	return 0, false
+}
+
+// listMultiplierMondayTweak returns the largest non-empty list slicing argument size, or
+// undefinedMultiplier when no such argument is provided. A requested list (e.g. unique ids) is an
+// exact upper bound on the returned list size, so it wins over any Int slicing argument.
+// Only called when mondaytweaks.ResolveArraySlicingArguments is enabled; returning
+// undefinedMultiplier leaves the untouched upstream resolution in multiplier in charge.
+func (ls *FieldListSize) listMultiplierMondayTweak(args map[string]ArgumentInfo, vars resolve.VariablesView) int {
+	listMultiplier := undefinedMultiplier
+	for _, slicingArg := range ls.SlicingArguments {
+		value, found, fromList := ls.resolveSlicingArgMondayTweak(slicingArg, args, vars)
+		if found && fromList && value > 0 && value > listMultiplier {
+			listMultiplier = value
+		}
+	}
+	return listMultiplier
 }
 
 // resolveSlicingArgMondayTweak is the mondaytweaks.ResolveArraySlicingArguments copy of
