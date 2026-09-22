@@ -160,6 +160,29 @@ var (
 	// wrapper around *http.Client — the same client is used by every planner from the same
 	// factory, so sharing is safe. Saves ~1 alloc per fetch per cached plan.
 	ReuseGraphQLSource atomic.Bool
+
+	// ResolveArraySlicingArguments lets a @listSize slicingArgument resolve to the length of a
+	// list value, not only to an Int. The IBM Cost Specification only describes Int slicing
+	// arguments, so the upstream implementation treats a list-valued slicing argument as "not
+	// provided": the field falls back to assumedSize or the default list size, and
+	// requireOneSlicingArgument rejects the operation even though the argument was provided.
+	// Apollo Router resolves list arguments to their length (see demand_control's
+	// infer_size_from_argument), and monday's schema uses list arguments — e.g.
+	// items(ids: [ID!]) — as the real bound on the returned list size.
+	//
+	// With this flag a list-valued slicing argument contributes its element count, both as a
+	// cost multiplier and as a provided argument for requireOneSlicingArgument validation.
+	//
+	// monday-specific adjustment on top of Apollo: a non-empty list wins over any Int slicing
+	// argument instead of competing with it for the maximum. A list of unique ids is an exact
+	// upper bound — the subgraph can never return more items than the ids requested — so
+	// items(ids: [1,2,3], limit: 100) is estimated at 3, not 100. Empty lists and lists that
+	// resolve to no value do not win; the Int arguments, assumedSize, or the default list size
+	// apply as before. When several list arguments are provided, the largest of them wins,
+	// matching the upstream maximum-based rule among the list values.
+	//
+	// When this flag is false, list-valued slicing arguments are ignored exactly as upstream.
+	ResolveArraySlicingArguments atomic.Bool
 )
 
 func init() {
@@ -175,4 +198,5 @@ func init() {
 	DisableUploadFinding.Store(true)
 	AddExtensionCodeToTransportErrors.Store(true)
 	ReuseGraphQLSource.Store(true)
+	ResolveArraySlicingArguments.Store(true)
 }
