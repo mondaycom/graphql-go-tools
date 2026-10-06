@@ -1,9 +1,12 @@
 package postprocess
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/wundergraph/graphql-go-tools/v2/pkg/engine/resolve"
 )
 
 func TestOrderSequenceByDependencies_ProcessFetchTree(t *testing.T) {
@@ -188,32 +191,90 @@ func TestOrderSequenceByDependencies_ProcessFetchTree(t *testing.T) {
 		)
 		require.Equal(t, expected, input)
 	})
-	// Regression for the O(2^N) blowup: a densely-connected fetch tree where node
-	// i depends on every earlier node [0..i-1] — the shape produced by mutations
-	// with many aliased root fields (e.g. 28-31 aliased delete_webhook). The old
-	// unmemoized recursive nodeDependsOn re-derived each node's transitive set on
-	// every comparison, so a tree this size would never finish. With memoization
-	// the result is computed once per ID and the test returns effectively instantly.
-	// Reaching the assertion at all proves the exponential is gone; we also assert
-	// the ordering is the expected ascending-by-fetchID sequence (0..N-1).
+
+	t.Run("two independent dependency trees interleave by depth", func(t *testing.T) {
+		// Tree one: 0 <- 1 <- 2. Tree two: 3 <- 4. No edges between them.
+		processor := &orderSequenceByDependencies{}
+		input := seq(
+			sf(2, dependsOn(1)),
+			sf(4, dependsOn(3)),
+			sf(1, dependsOn(0)),
+			sf(3),
+			sf(0),
+		)
+		processor.ProcessFetchTree(input)
+		expected := seq(
+			sf(0),
+			sf(3),
+			sf(1, dependsOn(0)),
+			sf(4, dependsOn(3)),
+			sf(2, dependsOn(1)),
+		)
+		require.Equal(t, expected, input)
+	})
+	t.Run("independent tree does not disturb the order of a related pair", func(t *testing.T) {
+		// Fetch 9 has many dependencies but is unrelated to 0 and 1;
+		// 1 must still follow its dependency 0 wherever 9 lands.
+		processor := &orderSequenceByDependencies{}
+		input := seq(
+			sf(1, dependsOn(0)),
+			sf(9, dependsOn(5, 6, 7)),
+			sf(0),
+			sf(7, dependsOn(6)),
+			sf(6, dependsOn(5)),
+			sf(5),
+		)
+		processor.ProcessFetchTree(input)
+		expected := seq(
+			sf(0),
+			sf(5),
+			sf(1, dependsOn(0)),
+			sf(6, dependsOn(5)),
+			sf(7, dependsOn(6)),
+			sf(9, dependsOn(5, 6, 7)),
+		)
+		require.Equal(t, expected, input)
+	})
+
 	t.Run("dense fully-connected chain (exponential regression)", func(t *testing.T) {
-		const n = 31
-		// Shuffle the input order so the sort has real work to do rather than
-		// receiving an already-sorted slice.
-		input := make([]resolve.FetchDependencies, 0, n)
-		for i := n - 1; i >= 0; i-- {
-			dependsOn := make([]int, 0, i)
-			for j := 0; j < i; j++ {
-				dependsOn = append(dependsOn, j)
-			}
-			input = append(input, resolve.FetchDependencies{FetchID: i, DependsOnFetchIDs: dependsOn})
-		}
-		seq := depsToSequence(input)
-		processor.ProcessFetchTree(seq)
-		got := sequenceToDeps(seq)
-		require.Len(t, got, n)
+		// This happens on mutations that have many fetches.
+		// Node i depends on every node j > i,
+		// so the correct order is the reverse of the ascending input.
+		const n = 255
+		tree := seq(denseChain(n)...)
+		processor := &orderSequenceByDependencies{}
+		processor.ProcessFetchTree(tree)
+		require.Len(t, tree.ChildNodes, n)
 		for i := range n {
-			require.Equal(t, i, got[i].FetchID, "node at position %d should be fetchID %d", i, i)
+			require.Equal(t, n-1-i, tree.ChildNodes[i].FetchID(), "node at position %d should be fetchID %d", i, n-1-i)
 		}
 	})
+}
+
+// denseChain returns n fetches where fetch i depends on every fetch j > i.
+func denseChain(n int) []*resolve.FetchTreeNode {
+	input := make([]*resolve.FetchTreeNode, 0, n)
+	for i := range n {
+		deps := make([]int, 0, n-i-1)
+		for j := i + 1; j < n; j++ {
+			deps = append(deps, j)
+		}
+		input = append(input, sf(i, dependsOn(deps...)))
+	}
+	return input
+}
+
+func BenchmarkOrderSequenceByDependencies_Dense(b *testing.B) {
+	for _, n := range []int{50, 100, 255} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			processor := &orderSequenceByDependencies{}
+			b.ReportAllocs()
+			for b.Loop() {
+				b.StopTimer()
+				tree := seq(denseChain(n)...)
+				b.StartTimer()
+				processor.ProcessFetchTree(tree)
+			}
+		})
+	}
 }

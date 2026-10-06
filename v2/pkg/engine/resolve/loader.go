@@ -62,6 +62,14 @@ type ResponseInfo struct {
 	Request *http.Request
 	// ResponseHeaders contains a clone of the headers of the response from the subgraph.
 	ResponseHeaders http.Header
+	// ResponseCacheHit reports the fetch was served from the response cache rather than the subgraph.
+	ResponseCacheHit bool
+	// ResponseCacheTTL is the lowest lifetime left on the entries the fetch was served from. Non-negative TTLs are considered.
+	// Use ResponseCacheHit to distinguish a cache hit with a zero TTL from a cache miss.
+	ResponseCacheTTL time.Duration
+	// ResponseCachePrivate reports that at least one entry the hit was served
+	// from belongs to the requesting user, so the response is private.
+	ResponseCachePrivate bool
 	// This should be private as we do not want user's to access the raw responseBody directly
 	responseBody []byte
 }
@@ -72,9 +80,12 @@ func (r *ResponseInfo) GetResponseBody() string {
 
 func newResponseInfo(res *result) *ResponseInfo {
 	responseInfo := &ResponseInfo{
-		StatusCode:   res.statusCode,
-		Err:          res.subgraphError,
-		responseBody: res.out,
+		StatusCode:           res.statusCode,
+		Err:                  res.subgraphError,
+		ResponseCacheHit:     res.responseCacheHit,
+		ResponseCacheTTL:     res.responseCacheTTL,
+		ResponseCachePrivate: res.responseCachePrivate,
+		responseBody:         res.out,
 	}
 	if res.httpResponseContext != nil {
 		// We're using the response.Request here, because the body will be nil (since the response was read) and won't
@@ -136,6 +147,20 @@ type result struct {
 	loaderHookContext context.Context
 
 	httpResponseContext *httpclient.ResponseContext
+	// sentHeaders is what the subgraph request went out with. The response
+	// cache digests these for Vary, not a second call to the headers builder,
+	// which need not answer the same twice.
+	sentHeaders http.Header
+	// responseCacheHit and responseCacheTTL record that the fetch was served entirely from the cache
+	// and the min lifetime left across its entries. Fetch-local, so the unlocked load phase is safe.
+	responseCacheHit bool
+	responseCacheTTL time.Duration
+	// responseCachePrivate records that a hit was served, in whole or part,
+	// from entries scoped to the requesting user.
+	responseCachePrivate bool
+	// responseCacheSurrogateKeys is what the fetch contributes to the cache tag
+	// header, read back on a hit and computed on a miss.
+	responseCacheSurrogateKeys []string
 	// out is the subgraph response body
 	out               []byte
 	singleFlightStats *singleFlightStats
@@ -419,6 +444,15 @@ func (l *Loader) loadPhase(ctx context.Context, prepared *preparedFetch) error {
 	if prepared.skipLoad {
 		return nil
 	}
+	// A merged fetch resolves its cache per entry, and that reshapes the request,
+	// so it happens here rather than on the whole-fetch path below.
+	if prepared.multiAssembly != nil {
+		if served, err := l.applyMultiEntityResponseCache(ctx, prepared); served || err != nil {
+			// If either every entry was warm or there was an error, we can return early.
+			return errors.WithStack(err)
+		}
+	}
+
 	if l.responseCacheLookup(prepared) {
 		// OnLoad is called before a fetch is executed.
 		// When we hit the response cache, we don't execute the fetch but we still want to call the hooks.
@@ -436,6 +470,10 @@ func (l *Loader) loadPhase(ctx context.Context, prepared *preparedFetch) error {
 
 	l.executeSourceLoad(ctx, prepared.item, prepared.source, prepared.input, prepared.res, prepared.trace)
 	if prepared.res.err != nil {
+		// TODO: for a MultiEntityFetch this marks all entries as failed,
+		//   including the ones served from the response cache.
+		//   Their dependents are then skipped and their fields stay null without an error.
+		//   Mark only the entries that were sent.
 		l.recordErroredFetchID(prepared.item)
 	}
 
@@ -457,6 +495,7 @@ func (l *Loader) mergePhase(prepared *preparedFetch) error {
 	if err := l.responseCacheCollect(prepared); err != nil {
 		l.reportResponseCacheError(fmt.Errorf("response cache collect error: %w", err))
 	}
+	l.responseCacheMergeSurrogateKeys(prepared.res)
 
 	err := l.mergeResult(prepared.item, prepared.res, prepared.items)
 	l.callOnFinished(prepared.res)
@@ -502,13 +541,25 @@ type preparedFetch struct {
 
 	responseCacheKeys []string
 
+	responseCachePrivateKeys []string
+
+	// responseCacheFound is round one of the lookup, so a write after a miss
+	// keeps the sets its records held.
+	responseCacheFound map[string]caching.Item
+
 	isRootFetchCache bool
 
+	// responseCacheHit is set when the fetch was answered entirely from the cache.
 	responseCacheHit bool
 
 	responseCacheItems []caching.Item
 
 	multiEntries []preparedMultiEntry
+
+	// multiAssembly is set for a MultiEntityFetch whose request will be sent: the
+	// material the load phase needs to rebuild it once the response-cache lookup
+	// has switched the warm entries off.
+	multiAssembly *multiAssembly
 }
 
 func (l *Loader) shouldSkipErroredDependencyLocked(item *FetchItem) bool {
@@ -720,7 +771,9 @@ func (l *Loader) mergeResult(fetchItem *FetchItem, res *result, items []*astjson
 	if res.fetchSkipped {
 		return nil
 	}
-	if len(res.out) == 0 {
+	// A multi entry served from the response cache has no bytes of its own: its
+	// entities are already in the document the parent handed it.
+	if len(res.out) == 0 && (res.multi == nil || res.multi.response == nil) {
 		return l.renderErrorsFailedToFetch(fetchItem, res, emptyGraphQLResponse)
 	}
 	// astjson.ParseBytesWithArena copies bytes onto the arena internally,
@@ -1680,11 +1733,8 @@ func (l *Loader) prepareSingleFetch(fetchItem *FetchItem, fetch *SingleFetch, it
 		prepared.skipLoad = true
 		return nil
 	}
-	if l.responseCacheEnabled() && rootFetchCacheable(fetchItem, fetch) {
-		prepared.responseCacheKeys = []string{caching.Key(
-			xxhash.Sum64(fetchInput),
-			xxhash.Sum64String(fetch.Info.DataSourceID),
-		)}
+	if l.responseCacheEnabledFor(res.ds.Name) && rootFetchCacheable(fetchItem, fetch) {
+		l.responseCacheSetKeys(prepared, caching.DigestString(fetch.Info.DataSourceID), []caching.Digest{caching.DigestBytes(fetchInput)})
 		prepared.isRootFetchCache = true
 	}
 
@@ -1761,14 +1811,10 @@ func (l *Loader) prepareEntityFetch(fetchItem *FetchItem, fetch *EntityFetch, it
 
 	// Built before SetInputUndefinedVariables rewrites the buffer in place, so
 	// the offsets above still point at what they were taken from.
-	if l.responseCacheEnabled() {
+	if l.responseCacheEnabledFor(res.ds.Name) {
 		rendered := preparedInput.Bytes()
-		selectionHash := responseCacheSelectionHash(
-			rendered[:responseCacheHeaderEnd],
-			rendered[responseCacheFooterStart:],
-		)
-		responseCacheItemHash := xxhash.Sum64(renderedItem)
-		prepared.responseCacheKeys = []string{caching.Key(responseCacheItemHash, selectionHash)}
+		selection := caching.DigestParts(rendered[:responseCacheHeaderEnd], rendered[responseCacheFooterStart:])
+		l.responseCacheSetKeys(prepared, selection, []caching.Digest{caching.DigestBytes(renderedItem)})
 	}
 
 	err = SetInputUndefinedVariables(preparedInput, undefinedVariables)
@@ -1797,9 +1843,14 @@ func (l *Loader) prepareEntityFetch(fetchItem *FetchItem, fetch *EntityFetch, it
 	return nil
 }
 
+type batchItemRef struct {
+	index      int
+	start, end int
+}
+
 type batchEntityTools struct {
 	keyGen           *xxhash.Digest
-	batchHashToIndex map[uint64]int
+	batchHashToIndex map[uint64]batchItemRef
 	a                arena.Arena
 }
 
@@ -1827,7 +1878,7 @@ func (p *_batchEntityToolPool) Get(items int) *batchEntityTools {
 	if item == nil {
 		return &batchEntityTools{
 			keyGen:           xxhash.New(),
-			batchHashToIndex: make(map[uint64]int, items),
+			batchHashToIndex: make(map[uint64]batchItemRef, items),
 			a:                arena.NewMonotonicArena(arena.WithMinBufferSize(1024)),
 		}
 	}
@@ -1880,7 +1931,7 @@ func (l *Loader) prepareBatchEntityFetch(fetchItem *FetchItem, fetch *BatchEntit
 		return errors.WithStack(err)
 	}
 	responseCacheHeaderEnd := preparedInput.Len()
-	var responseCacheItemHashes []uint64
+	var responseCacheItems []caching.Digest
 
 	batchItemIndex := 0
 	addSeparator := false
@@ -1909,31 +1960,34 @@ WithNextItem:
 			res.tools.keyGen.Reset()
 			_, _ = res.tools.keyGen.Write(itemInput.Bytes())
 			itemHash := res.tools.keyGen.Sum64()
-			if existingIndex, ok := res.tools.batchHashToIndex[itemHash]; ok {
-				batchStats[existingIndex] = arena.SliceAppend(res.tools.a, batchStats[existingIndex], items[i])
+			// The hash narrows, the bytes decide: a collision is a new representation.
+			if ref, ok := res.tools.batchHashToIndex[itemHash]; ok &&
+				bytes.Equal(preparedInput.Bytes()[ref.start:ref.end], itemInput.Bytes()) {
+				batchStats[ref.index] = arena.SliceAppend(res.tools.a, batchStats[ref.index], items[i])
 				continue WithNextItem
-			} else {
-				if addSeparator {
-					err = fetch.Input.Separator.Render(l.ctx, nil, preparedInput)
-					if err != nil {
-						return errors.WithStack(err)
-					}
-				}
-				_, _ = itemInput.WriteTo(preparedInput)
-				// new unique representation
-				res.tools.batchHashToIndex[itemHash] = batchItemIndex
-				if l.responseCacheEnabled() {
-					responseCacheItemHashes = append(responseCacheItemHashes, itemHash)
-				}
-				// A new targets bucket for the unique index must be allocated on the arena:
-				// a heap-allocated bucket would only be referenced from arena memory,
-				// so the GC could collect its backing array while it is still in use.
-				bucket := arena.AllocateSlice[*astjson.Value](res.tools.a, 1, 1)
-				bucket[0] = items[i]
-				batchStats = arena.SliceAppend(res.tools.a, batchStats, bucket)
-				batchItemIndex++
-				addSeparator = true
 			}
+			if addSeparator {
+				err = fetch.Input.Separator.Render(l.ctx, nil, preparedInput)
+				if err != nil {
+					return errors.WithStack(err)
+				}
+			}
+			// Digested before WriteTo drains the buffer.
+			if l.responseCacheEnabledFor(res.ds.Name) {
+				responseCacheItems = append(responseCacheItems, caching.DigestBytes(itemInput.Bytes()))
+			}
+			start := preparedInput.Len()
+			_, _ = itemInput.WriteTo(preparedInput)
+			// new unique representation
+			res.tools.batchHashToIndex[itemHash] = batchItemRef{index: batchItemIndex, start: start, end: preparedInput.Len()}
+			// A new targets bucket for the unique index must be allocated on the arena:
+			// a heap-allocated bucket would only be referenced from arena memory,
+			// so the GC could collect its backing array while it is still in use.
+			bucket := arena.AllocateSlice[*astjson.Value](res.tools.a, 1, 1)
+			bucket[0] = items[i]
+			batchStats = arena.SliceAppend(res.tools.a, batchStats, bucket)
+			batchItemIndex++
+			addSeparator = true
 		}
 	}
 
@@ -1955,16 +2009,10 @@ WithNextItem:
 		return errors.WithStack(err)
 	}
 
-	if l.responseCacheEnabled() && len(responseCacheItemHashes) > 0 {
+	if len(responseCacheItems) > 0 {
 		rendered := preparedInput.Bytes()
-		selectionHash := responseCacheSelectionHash(
-			rendered[:responseCacheHeaderEnd],
-			rendered[responseCacheFooterStart:],
-		)
-		prepared.responseCacheKeys = make([]string, len(responseCacheItemHashes))
-		for i, itemHash := range responseCacheItemHashes {
-			prepared.responseCacheKeys[i] = caching.Key(itemHash, selectionHash)
-		}
+		selection := caching.DigestParts(rendered[:responseCacheHeaderEnd], rendered[responseCacheFooterStart:])
+		l.responseCacheSetKeys(prepared, selection, responseCacheItems)
 	}
 
 	err = SetInputUndefinedVariables(preparedInput, undefinedVariables)
@@ -2116,6 +2164,7 @@ func (l *Loader) loadByContext(ctx context.Context, source DataSource, fetchItem
 	}
 
 	headers, extraKey := l.headersForSubgraphRequest(fetchItem)
+	res.sentHeaders = headers
 
 	if !l.singleFlightAllowed(fetchItem) {
 		// Disable single flight for mutations

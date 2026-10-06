@@ -414,7 +414,7 @@ func (p *Planner[T]) ConfigureFetch() resolve.FetchConfiguration {
 
 		opDocument, opReport := astparser.ParseGraphqlDocumentBytes(operation)
 		if opReport.HasErrors() {
-			p.stopWithError(errors.WithStack(fmt.Errorf("failed to parse operation: %w", opReport)))
+			p.stopWithError(errors.WithStack(fmt.Errorf("failed to parse operation: %w", &opReport)))
 			return resolve.FetchConfiguration{}
 		}
 
