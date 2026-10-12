@@ -35,6 +35,26 @@ type HookableSubscriptionDataSource interface {
 	SubscriptionOnStart(ctx StartupHookContext, input []byte) (err error)
 }
 
+// BackfillSubscriptionDataSource is implemented by subscription data sources that can
+// replay events a subscriber missed, e.g. while it was reconnecting.
+//
+// For these sources the resolver guarantees a gap-free, ordered hand-over from replayed
+// to live events:
+//  1. Source.Start has returned before SubscriptionBackfill runs, so the source must be
+//     subscribed to live events by the time Start returns. Anything published after the
+//     backfill read is then guaranteed to arrive as a live event.
+//  2. Live events for the subscriber are held from the moment it is registered until
+//     SubscriptionBackfill returns. Events emitted through ctx.Updater are written
+//     immediately, in order.
+//  3. The held events are then written, except those for which the returned skip
+//     function reports true (typically because the backfill already sent them).
+//
+// SubscriptionOnStart, if implemented, runs after Source.Start and before
+// SubscriptionBackfill. Returning an error from either closes the subscription.
+type BackfillSubscriptionDataSource interface {
+	SubscriptionBackfill(ctx StartupHookContext, input []byte) (skip func(data []byte) bool, err error)
+}
+
 // HookablePubsubDatasource is an extension of HookableSubscriptionDataSource for pubsub datasources.
 // They contain additional hooks which make sense for pubsub based datasources but not for normal
 // subscription based datasources.

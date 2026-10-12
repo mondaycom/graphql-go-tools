@@ -202,6 +202,11 @@ type ResolverOptions struct {
 	// MaxSubscriptionFetchTimeout defines the maximum time a subscription fetch can take before it is considered timed out
 	MaxSubscriptionFetchTimeout time.Duration
 
+	// MaxSubscriptionBackfillBuffer caps how many live events are buffered per subscription while a
+	// BackfillSubscriptionDataSource replays missed events. When the cap is exceeded the subscription
+	// is closed with ErrSubscriptionBackfillOverflow. 0 applies the default (DefaultMaxSubscriptionBackfillBuffer).
+	MaxSubscriptionBackfillBuffer int
+
 	// ApolloRouterCompatibilitySubrequestHTTPError is a compatibility flag for Apollo Router, it is used to handle HTTP errors in subrequests differently
 	ApolloRouterCompatibilitySubrequestHTTPError bool
 
@@ -253,6 +258,10 @@ func New(ctx context.Context, options ResolverOptions) *Resolver {
 
 	if options.MaxSubscriptionFetchTimeout == 0 {
 		options.MaxSubscriptionFetchTimeout = 30 * time.Second
+	}
+
+	if options.MaxSubscriptionBackfillBuffer <= 0 {
+		options.MaxSubscriptionBackfillBuffer = DefaultMaxSubscriptionBackfillBuffer
 	}
 
 	if !options.OmitSubgraphErrorExtensions {
@@ -844,7 +853,10 @@ type trigger struct {
 	subscriptions map[SubscriptionIdentifier]*subscriptionState
 	// initialized is set to true when the trigger is started and initialized.
 	initialized atomic.Bool
-	updater     *subscriptionUpdater
+	// started is closed once the trigger's source has started. Subscriptions of a
+	// BackfillSubscriptionDataSource wait on it before reading missed events.
+	started chan struct{}
+	updater *subscriptionUpdater
 }
 
 func (t *trigger) subscriptionIds() map[context.Context]SubscriptionIdentifier {
@@ -939,6 +951,9 @@ type subscriptionState struct {
 	removed atomic.Bool
 	// lastWriteTime stores unix nanos of the last successful data write.
 	lastWriteTime atomic.Int64
+	// backfill buffers live events while missed events are replayed.
+	// nil unless the trigger source is a BackfillSubscriptionDataSource.
+	backfill *backfillBuffer
 }
 
 func closeSubs(subs []*subscriptionState) {
@@ -1006,6 +1021,8 @@ func (r *Resolver) executeSubscriptionUpdate(resolveCtx *Context, sub *subscript
 	input := make([]byte, len(sharedInput))
 	copy(input, sharedInput)
 
+	eventID, _ := jsonparser.GetString(input, SubscriptionEventIDField)
+
 	resolveArena := r.resolveArenaPool.Acquire(resolveCtx.Request.ID)
 	resolvable := NewResolvable(resolveArena.Arena, r.options.ResolvableOptions)
 	authorization := NewFieldAuthorization(resolveCtx)
@@ -1072,6 +1089,10 @@ func (r *Resolver) executeSubscriptionUpdate(resolveCtx *Context, sub *subscript
 	}
 	resolvable.skipValueCompletion = loader.skipValueCompletion
 
+	if w, ok := sub.writer.(SubscriptionEventIDWriter); ok {
+		w.SetEventID(eventID)
+	}
+
 	if err := resolvable.Resolve(resolveCtx.ctx, sub.resolve.Response.Data, sub.resolve.Response.Fetches, sub.writer); err != nil {
 		r.resolveArenaPool.Release(resolveArena)
 		r.errorFormatter.WriteError(resolveCtx, err, sub.resolve.Response, sub.writer)
@@ -1137,13 +1158,7 @@ func (r *Resolver) executeStartupHooks(add *addSubscription, updater *subscripti
 	if !ok {
 		return nil
 	}
-	hookCtx := StartupHookContext{
-		Context: add.ctx.Context(),
-		Updater: func(data []byte) {
-			updater.UpdateSubscription(add.id, data)
-		},
-	}
-	err := hook.SubscriptionOnStart(hookCtx, add.input)
+	err := hook.SubscriptionOnStart(startupHookContext(add, updater), add.input)
 	if err != nil && r.options.Debug {
 		fmt.Printf("resolver:trigger:subscription:startup:failed:%d\n", add.id.SubscriptionID)
 	}
@@ -1199,6 +1214,11 @@ func (r *Resolver) addSubscription(triggerID uint64, add *addSubscription) error
 	if add.ctx.ExecutionOptions.SendHeartbeat {
 		s.heartbeat = true
 	}
+	backfillSource, isBackfill := add.resolve.Trigger.Source.(BackfillSubscriptionDataSource)
+	if isBackfill {
+		// Buffer live events from the moment the subscription is visible to the fan-out.
+		s.backfill = newBackfillBuffer(r.options.MaxSubscriptionBackfillBuffer)
+	}
 
 	trig, ok := r.triggers[triggerID]
 	if ok {
@@ -1210,6 +1230,10 @@ func (r *Resolver) addSubscription(triggerID uint64, add *addSubscription) error
 		}
 		// Register first so startup hooks can deliver initial data via UpdateSubscription.
 		r.registerSubscriptionLocked(trig, s)
+		if isBackfill {
+			go r.backfillOnExistingTrigger(add, s, trig, backfillSource)
+			return nil
+		}
 		// Execute the startup hooks in a goroutine to avoid holding the lock.
 		go func() {
 			if err := r.executeStartupHooks(add, trig.updater); err != nil {
@@ -1235,6 +1259,7 @@ func (r *Resolver) addSubscription(triggerID uint64, add *addSubscription) error
 		id:            triggerID,
 		subscriptions: make(map[SubscriptionIdentifier]*subscriptionState),
 		cancel:        cancel,
+		started:       make(chan struct{}),
 		updater:       updater,
 	}
 	r.triggers[triggerID] = trig
@@ -1251,8 +1276,13 @@ func (r *Resolver) addSubscription(triggerID uint64, add *addSubscription) error
 		}
 
 		// The startup hook is blocking so it can reject the subscription before Source.Start.
+		// Backfill sources are the exception: they must be subscribed to live events before
+		// missed events are read, so their hooks run after Source.Start (see backfillSubscription).
 		// If either step fails, broadcast the error to all subs and tear down the trigger.
-		err := r.executeStartupHooks(add, trig.updater)
+		var err error
+		if !isBackfill {
+			err = r.executeStartupHooks(add, trig.updater)
+		}
 		if err == nil {
 			err = add.resolve.Trigger.Source.Start(cloneCtx, add.headers, add.input, trig.updater)
 		}
@@ -1272,6 +1302,10 @@ func (r *Resolver) addSubscription(triggerID uint64, add *addSubscription) error
 		if r.options.Debug {
 			fmt.Printf("resolver:trigger:started:%d\n", triggerID)
 		}
+
+		if isBackfill {
+			r.backfillSubscription(add, s, trig.updater, backfillSource)
+		}
 	}()
 	return nil
 }
@@ -1289,7 +1323,9 @@ func (r *Resolver) markTriggerInitialized(triggerID uint64) {
 	if !ok {
 		return
 	}
-	trig.initialized.Store(true)
+	if trig.initialized.CompareAndSwap(false, true) && trig.started != nil {
+		close(trig.started)
+	}
 	if r.reporter != nil {
 		r.reporter.TriggerCountInc(1)
 	}
@@ -1514,6 +1550,9 @@ func (r *Resolver) handleTriggerUpdate(id uint64, data []byte) {
 		if sub.removed.Load() {
 			continue
 		}
+		if sub.backfill.hold(data) {
+			continue
+		}
 		wg.Go(func() {
 			r.executeSubscriptionUpdate(sub.ctx, sub, data)
 		})
@@ -1522,7 +1561,9 @@ func (r *Resolver) handleTriggerUpdate(id uint64, data []byte) {
 }
 
 // handleUpdateSubscription sends data to a single subscription.
-func (r *Resolver) handleUpdateSubscription(id uint64, data []byte, subIdentifier SubscriptionIdentifier) {
+// Live events are held while the subscription is backfilling; direct writes
+// (startup hooks, backfill, buffer flush) bypass the hold.
+func (r *Resolver) handleUpdateSubscription(id uint64, data []byte, subIdentifier SubscriptionIdentifier, direct bool) {
 	trig, ok := r.getTrigger(id)
 	if !ok {
 		return
@@ -1539,6 +1580,9 @@ func (r *Resolver) handleUpdateSubscription(id uint64, data []byte, subIdentifie
 	}
 
 	if sub != nil && !sub.removed.Load() {
+		if !direct && sub.backfill.hold(data) {
+			return
+		}
 		r.executeSubscriptionUpdate(sub.ctx, sub, data)
 	}
 }
@@ -1964,7 +2008,45 @@ func (s *subscriptionUpdater) UpdateSubscription(id SubscriptionIdentifier, data
 	if s.debug {
 		fmt.Printf("resolver:subscription_updater:update:%d\n", s.triggerID)
 	}
-	s.resolver.handleUpdateSubscription(s.triggerID, data, id)
+	s.resolver.handleUpdateSubscription(s.triggerID, data, id, false)
+}
+
+// updateSubscriptionDirect is UpdateSubscription for startup hooks and backfill.
+// Unlike live events, these writes are never held by a backfilling subscription.
+func (s *subscriptionUpdater) updateSubscriptionDirect(id SubscriptionIdentifier, data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done || s.ctx.Err() != nil {
+		return
+	}
+	s.resolver.handleUpdateSubscription(s.triggerID, data, id, true)
+}
+
+// finishBackfill ends the backfill of a subscription and flushes the live events held
+// meanwhile, skipping those for which skip reports true. It holds mu for the whole
+// flush, so no new live event reaches the subscription until the held ones are written.
+// It returns ErrSubscriptionBackfillOverflow if events were dropped while held.
+//
+// TODO: possible lock contention. mu is held while up to MaxSubscriptionBackfillBuffer events
+// are resolved and written, which can include subgraph fetches, so live delivery to every other
+// subscription of the trigger stalls until the flush ends.
+func (s *subscriptionUpdater) finishBackfill(id SubscriptionIdentifier, sub *subscriptionState, skip func(data []byte) bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	held, overflowed := sub.backfill.release(skip)
+	if overflowed {
+		return ErrSubscriptionBackfillOverflow
+	}
+	if s.done || s.ctx.Err() != nil {
+		return nil
+	}
+	for _, data := range held {
+		if skip != nil && skip(data) {
+			continue
+		}
+		s.resolver.handleUpdateSubscription(s.triggerID, data, id, true)
+	}
+	return nil
 }
 
 func (s *subscriptionUpdater) Subscriptions() map[context.Context]SubscriptionIdentifier {

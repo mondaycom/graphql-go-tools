@@ -143,6 +143,17 @@ type SubscriptionResponseWriter interface {
 	Error(data []byte)
 }
 
+// SubscriptionEventIDField is the top-level field of a subscription event payload holding the
+// ID of the event, used by clients to resume the subscription after it.
+const SubscriptionEventIDField = "eventId"
+
+// SubscriptionEventIDWriter is implemented by subscription writers that send the ID of an event
+// with its response, e.g. as the SSE "id" field. SetEventID is called before each update is
+// written, with an empty id when the event has none.
+type SubscriptionEventIDWriter interface {
+	SetEventID(id string)
+}
+
 func writeGraphqlResponse(buf *BufPair, writer io.Writer, ignoreData bool) (err error) {
 	hasErrors := buf.Errors.Len() != 0
 	hasData := buf.Data.Len() != 0 && !ignoreData
